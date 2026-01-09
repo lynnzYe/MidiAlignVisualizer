@@ -1,0 +1,5 @@
+{
+  "name": "MIDI Alignment Visualizer",
+  "description": "A high-precision MIDI alignment tool for music researchers, featuring dual-panel piano rolls, deterministic note ID mapping, and interactive alignment visualization.",
+  "requestFramePermissions": []
+}
