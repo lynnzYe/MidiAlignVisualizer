@@ -1,6 +1,6 @@
 
 import { Midi } from '@tonejs/midi';
-import { MidiData, MidiNote, AlignmentPair } from '../types';
+import { MidiData, MidiNote, AlignmentTuple } from '../types';
 
 /**
  * Parses a MIDI file and assigns deterministic IDs based on:
@@ -10,7 +10,7 @@ import { MidiData, MidiNote, AlignmentPair } from '../types';
 export async function parseMidiFile(file: File): Promise<MidiData | null> {
   try {
     const arrayBuffer = await file.arrayBuffer();
-    
+
     // Check for MIDI magic bytes "MThd"
     const view = new Uint8Array(arrayBuffer);
     if (view[0] !== 0x4d || view[1] !== 0x54 || view[2] !== 0x68 || view[3] !== 0x64) {
@@ -21,7 +21,7 @@ export async function parseMidiFile(file: File): Promise<MidiData | null> {
 
     const midi = new Midi(arrayBuffer);
     let allNotes: MidiNote[] = [];
-    
+
     midi.tracks.forEach(track => {
       track.notes.forEach(note => {
         allNotes.push({
@@ -60,20 +60,21 @@ export async function parseMidiFile(file: File): Promise<MidiData | null> {
  * Parses alignment CSV. Expected format: score_id,perf_id
  * Ignores header if present.
  */
-export async function parseAlignmentCsv(file: File): Promise<AlignmentPair[]> {
+export async function parseAlignmentCsv(file: File): Promise<AlignmentTuple[]> {
   try {
     if (!file) return [];
     const text = await file.text();
     const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
-    const pairs: AlignmentPair[] = [];
+    const pairs: AlignmentTuple[] = [];
 
     lines.forEach(line => {
       const parts = line.split(/[,\s]+/).map(p => p.trim());
       if (parts.length >= 2) {
         const sId = parseInt(parts[0]);
-        const pId = parseInt(parts[1]);
+        const aId = parseInt(parts[1])
+        const pId = parseInt(parts[2]);
         if (!isNaN(sId) && !isNaN(pId)) {
-          pairs.push({ scoreId: sId, perfId: pId });
+          pairs.push({ scoreId: sId, annotId: aId, perfId: pId });
         }
       }
     });

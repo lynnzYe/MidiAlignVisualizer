@@ -204,7 +204,7 @@ const PianoRoll: React.FC<PianoRollProps> = ({
 
   return (
     <div ref={containerRef} className="relative w-full h-full bg-[#08080a] overflow-hidden">
-      <div className="absolute top-5 left-5 px-3 py-1.5 bg-zinc-950/90 rounded-lg text-[9px] text-zinc-600 font-black tracking-[0.3em] z-10 border border-white/[0.03] pointer-events-none uppercase shadow-2xl">
+      <div className="absolute top-5 left-5 px-3 py-1.5 bg-zinc-950/90 rounded-lg text-[9px] text-zinc-500 font-black tracking-[0.3em] z-10 border border-white/[0.2] pointer-events-none uppercase shadow-2xl">
         {label}
       </div>
       <canvas ref={canvasRef} onWheel={handleWheel} onClick={handleClick} className="cursor-crosshair w-full h-full block" />

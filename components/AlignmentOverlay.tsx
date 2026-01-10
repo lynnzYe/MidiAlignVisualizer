@@ -1,11 +1,11 @@
 
 import React, { useMemo } from 'react';
-import { MidiData, AlignmentPair, ViewState, AlignmentVisibility } from '../types';
+import { MidiData, AlignmentTuple, ViewState, AlignmentVisibility } from '../types';
 
 interface AlignmentOverlayProps {
   scoreData: MidiData | null;
   perfData: MidiData | null;
-  alignment: AlignmentPair[];
+  alignment: AlignmentTuple[];
   scoreViewState: ViewState;
   perfViewState: ViewState;
   visibility: AlignmentVisibility;

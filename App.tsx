@@ -2,7 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from "react";
 import {
   MidiData,
   ViewState,
-  AlignmentPair,
+  AlignmentTuple,
   AlignmentVisibility,
   MidiNote,
   PlaybackState,
@@ -25,14 +25,14 @@ import {
   CheckCircle2,
   Clock,
 } from "lucide-react";
-
+// TODO: check alignment seems to be of wrong order. Id assignment
 const PLAYHEAD_ANCHOR_X = 100; // Pixels from left edge where playback starts
 
 const App: React.FC = () => {
   const [scoreMidi, setScoreMidi] = useState<MidiData | null>(null);
   const [perfMidi, setPerfMidi] = useState<MidiData | null>(null);
-  const [alignment, setAlignment] = useState<AlignmentPair[]>([]);
-  const [gtAlignment, setGtAlignment] = useState<AlignmentPair[]>([]);
+  const [alignment, setAlignment] = useState<AlignmentTuple[]>([]);
+  const [gtAlignment, setGtAlignment] = useState<AlignmentTuple[]>([]);
 
   const [scoreViewState, setScoreViewState] = useState<ViewState>({
     zoomX: 100,
@@ -48,6 +48,7 @@ const App: React.FC = () => {
   });
   const [selectedNote, setSelectedNote] = useState<{
     id: number;
+    midi: number;
     panel: "score" | "perf";
   } | null>(null);
   const [visibility, setVisibility] = useState<AlignmentVisibility>("full");
@@ -84,10 +85,30 @@ const App: React.FC = () => {
         e.preventDefault();
         togglePlayback(playback.activePanel || "score");
       }
+      // MoveID: Keyboard navigation for selected note
+      if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && selectedNote) {
+        e.preventDefault();
+        const midiData = selectedNote.panel === "score" ? scoreMidi : perfMidi;
+        if (!midiData) return;
+
+        const currentId = selectedNote.id;
+        const newId = e.key === "ArrowRight" ? currentId + 1 : currentId - 1;
+        const newPitch = midiData.notes[newId].pitch;
+
+        if (newId >= 0 && newId < midiData.notes.length) {
+          setSelectedNote({ ...selectedNote, id: newId, midi: newPitch });
+        }
+      }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [playback.activePanel, playback.isPlaying]);
+  }, [
+    playback.activePanel,
+    playback.isPlaying,
+    selectedNote,
+    scoreMidi,
+    perfMidi,
+  ]);
 
   // Playback Loop
   useEffect(() => {
@@ -167,7 +188,8 @@ const App: React.FC = () => {
         isPlaybackActive && playback.activePanel === panel;
 
       if (panel === "score") {
-        // Don't allow X-scroll on a panel that is currently driving the playhead
+        // Allow independent X-scroll on a panel if it's not the playhead driver
+        // If sync is on, we allow scrolling if not currently playing
         const dx = isThisPanelPlaying ? 0 : deltaX;
         setScoreViewState((prev) => ({
           ...prev,
@@ -175,7 +197,7 @@ const App: React.FC = () => {
           scrollY: prev.scrollY + deltaY,
         }));
 
-        // If sync is on, only propagate if playback isn't pinning the other panel
+        // Only propagate sync scroll if playback is not active
         if (syncScroll && !isPlaybackActive) {
           setPerfViewState((prev) => ({ ...prev, scrollX: prev.scrollX + dx }));
         }
@@ -366,7 +388,9 @@ const App: React.FC = () => {
 
   const handleNoteClick = (n: MidiNote, panel: "score" | "perf") => {
     setSelectedNote((prev) =>
-      prev?.id === n.id && prev?.panel === panel ? null : { id: n.id, panel }
+      prev?.id === n.id && prev?.panel === panel
+        ? null
+        : { id: n.id, midi: n.pitch, panel }
     );
   };
 
@@ -525,7 +549,7 @@ const App: React.FC = () => {
 
           <div className="flex-1 relative group border-b border-white/[0.04]">
             <PianoRoll
-              label="SCORE VIEW"
+              label="SCORE"
               data={scoreMidi}
               viewState={scoreViewState}
               playheadTime={
@@ -590,14 +614,15 @@ const App: React.FC = () => {
           </div>
 
           <div className="h-0 relative z-40 flex items-center justify-center">
-            <div className="absolute bg-[#121214] px-6 py-2 rounded-full border border-white/10 text-[9px] font-black text-zinc-500 tracking-[0.5em] shadow-[0_0_30px_rgba(0,0,0,1)] uppercase select-none">
-              Cross-Analysis Node
+            <div className="absolute inset-x-0 top-1/2 h-px bg-white opacity-40" />
+            <div className="absolute -top-4 bg-[#121214] px-6 py-2 rounded-full border border-white/10 text-[9px] font-black text-zinc-500 tracking-[0.5em] shadow-[0_0_30px_rgba(0,0,0,1)] uppercase select-none">
+              Cross Comparison
             </div>
           </div>
 
           <div className="flex-1 relative group">
             <PianoRoll
-              label="PERF VIEW"
+              label="PERFORMANCE"
               data={perfMidi}
               viewState={perfViewState}
               playheadTime={
@@ -689,10 +714,10 @@ const App: React.FC = () => {
           {selectedNote && (
             <span className="text-emerald-400 flex items-center gap-3 bg-emerald-500/10 px-4 py-2 rounded-lg border border-emerald-500/20 shadow-lg animate-in fade-in slide-in-from-left-2">
               <div className="w-2 h-2 rounded-full bg-emerald-400" />
-              Node:{" "}
+              Note:{" "}
               <span className="text-zinc-100 font-mono tracking-normal">
                 {selectedNote.panel === "score" ? "SCORE" : "PERF"} #ID-
-                {selectedNote.id}
+                {selectedNote.id} #MIDI-{selectedNote.midi}
               </span>
             </span>
           )}
@@ -701,7 +726,9 @@ const App: React.FC = () => {
           <span className="flex items-center gap-3 text-zinc-600 opacity-80">
             <Info className="w-4 h-4 text-emerald-500/50" />{" "}
             <span className="text-zinc-500">
-              ALT: Pitch Zoom | CMD: Time Zoom | V: Sync
+              scroll + ALT: Pitch Zoom, scroll + CMD: Time Zoom,
+              <br></br>
+              V: Sync, left/right: next ID
             </span>
           </span>
           <div className="h-5 w-px bg-white/10" />

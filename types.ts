@@ -12,8 +12,9 @@ export interface MidiData {
   duration: number;
 }
 
-export interface AlignmentPair {
+export interface AlignmentTuple {
   scoreId: number;
+  annotId: number; // Intermediary score (subset, 1-1 mapped to perfId)
   perfId: number;
 }
 
