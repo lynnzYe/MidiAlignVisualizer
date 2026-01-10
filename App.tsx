@@ -760,15 +760,16 @@ const App: React.FC = () => {
             <div className="flex items-center gap-3 bg-emerald-500/10 px-4 py-2 rounded-lg border border-emerald-500/30 shadow-lg text-[10px] text-emerald-400">
               <span className="flex items-center gap-2 border-r border-emerald-500/20 pr-3">
                 <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                {selectedNote.panel === "score" ? "SCORE" : "PERF"} NODE
+                {selectedNote.panel === "score" ? "SCORE" : "PERF"} Note
               </span>
               <span className="text-zinc-100 flex items-center gap-3 tabular-nums font-mono">
                 <ChevronLeft className="w-3 h-3 text-emerald-500/40" />
-                ID #{selectedNote.id}
+                ID-{selectedNote.id}, MIDI-{selectedNote.midi}
                 <ChevronRight className="w-3 h-3 text-emerald-500/40" />
               </span>
+              <span className="text-zinc-100 flex items-center gap-3 tabular-nums font-mono"></span>
               {(selectedNote.panel === "score"
-                ? scoreUnmappedIds.has(selectedNote.id)
+                ? scoreUnmappedIds.has(selectedNote.id) && <></>
                 : perfUnmappedIds.has(selectedNote.id)) && (
                 <span className="ml-2 flex items-center gap-1.5 px-2 py-0.5 bg-red-500/20 text-red-400 rounded-md border border-red-500/30 text-[8px] font-black uppercase">
                   <AlertCircle className="w-3 h-3" /> UNMAPPED
