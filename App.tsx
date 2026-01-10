@@ -1,4 +1,10 @@
-import React, { useState, useCallback, useRef, useEffect } from "react";
+import React, {
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  useMemo,
+} from "react";
 import {
   MidiData,
   ViewState,
@@ -24,6 +30,9 @@ import {
   Target,
   CheckCircle2,
   Clock,
+  ChevronRight,
+  ChevronLeft,
+  AlertCircle,
 } from "lucide-react";
 // TODO: check alignment seems to be of wrong order. Id assignment
 const PLAYHEAD_ANCHOR_X = 100; // Pixels from left edge where playback starts
@@ -69,6 +78,38 @@ const App: React.FC = () => {
   const perfInputRef = useRef<HTMLInputElement>(null);
   const alignInputRef = useRef<HTMLInputElement>(null);
   const gtInputRef = useRef<HTMLInputElement>(null);
+
+  // Unmapped detection logic
+  const scoreUnmappedIds = useMemo(() => {
+    if (!scoreMidi || alignment.length === 0) return new Set<number>();
+    const mapped = new Set<number>();
+    const explicitlyUnmapped = new Set<number>();
+    alignment.forEach((p) => {
+      if (p.scoreId !== -1 && p.perfId !== -1) mapped.add(p.scoreId);
+      if (p.scoreId !== -1 && p.perfId === -1)
+        explicitlyUnmapped.add(p.scoreId);
+    });
+    const result = new Set<number>(explicitlyUnmapped);
+    scoreMidi.notes.forEach((n) => {
+      if (!mapped.has(n.id)) result.add(n.id);
+    });
+    return result;
+  }, [scoreMidi, alignment]);
+
+  const perfUnmappedIds = useMemo(() => {
+    if (!perfMidi || alignment.length === 0) return new Set<number>();
+    const mapped = new Set<number>();
+    const explicitlyUnmapped = new Set<number>();
+    alignment.forEach((p) => {
+      if (p.perfId !== -1 && p.scoreId !== -1) mapped.add(p.perfId);
+      if (p.perfId !== -1 && p.scoreId === -1) explicitlyUnmapped.add(p.perfId);
+    });
+    const result = new Set<number>(explicitlyUnmapped);
+    perfMidi.notes.forEach((n) => {
+      if (!mapped.has(n.id)) result.add(n.id);
+    });
+    return result;
+  }, [perfMidi, alignment]);
 
   // Hotkeys
   useEffect(() => {
@@ -130,7 +171,7 @@ const App: React.FC = () => {
             if (sNote) {
               const pId = alignment.find((a) => a.scoreId === sNote.id)?.perfId;
               const pNote = perfMidi?.notes.find((n) => n.id === pId);
-              if (pNote)
+              if (pNote && pId !== -1)
                 setPerfViewState((prev) => ({
                   ...prev,
                   scrollX: pNote.start - PLAYHEAD_ANCHOR_X / prev.zoomX,
@@ -149,7 +190,7 @@ const App: React.FC = () => {
             if (pNote) {
               const sId = alignment.find((a) => a.perfId === pNote.id)?.scoreId;
               const sNote = scoreMidi?.notes.find((n) => n.id === sId);
-              if (sNote)
+              if (sNote && sId !== -1)
                 setScoreViewState((prev) => ({
                   ...prev,
                   scrollX: sNote.start - PLAYHEAD_ANCHOR_X / prev.zoomX,
@@ -287,6 +328,8 @@ const App: React.FC = () => {
     const lines: React.ReactElement[] = [];
 
     alignment.forEach((pair, idx) => {
+      if (pair.scoreId === -1 || pair.perfId === -1) return;
+
       const sNote = scoreMidi.notes.find((n) => n.id === pair.scoreId);
       const pNote = perfMidi.notes.find((n) => n.id === pair.perfId);
       if (!sNote || !pNote) return;
@@ -346,7 +389,7 @@ const App: React.FC = () => {
           (selectedNote.panel === "perf" && gt.perfId === selectedNote.id)
       );
 
-      if (pair) {
+      if (pair && pair.scoreId !== -1 && pair.perfId !== -1) {
         const sNote = scoreMidi.notes.find((n) => n.id === pair.scoreId);
         const pNote = perfMidi.notes.find((n) => n.id === pair.perfId);
         const isAlreadyDrawn = alignment.some(
@@ -551,6 +594,7 @@ const App: React.FC = () => {
             <PianoRoll
               label="SCORE"
               data={scoreMidi}
+              unmappedNoteIds={scoreUnmappedIds}
               viewState={scoreViewState}
               playheadTime={
                 playback.activePanel === "score" ? playheadTime : null
@@ -624,6 +668,7 @@ const App: React.FC = () => {
             <PianoRoll
               label="PERFORMANCE"
               data={perfMidi}
+              unmappedNoteIds={perfUnmappedIds}
               viewState={perfViewState}
               playheadTime={
                 playback.activePanel === "perf" ? playheadTime : null
@@ -712,14 +757,24 @@ const App: React.FC = () => {
             </div>
           </div>
           {selectedNote && (
-            <span className="text-emerald-400 flex items-center gap-3 bg-emerald-500/10 px-4 py-2 rounded-lg border border-emerald-500/20 shadow-lg animate-in fade-in slide-in-from-left-2">
-              <div className="w-2 h-2 rounded-full bg-emerald-400" />
-              Note:{" "}
-              <span className="text-zinc-100 font-mono tracking-normal">
-                {selectedNote.panel === "score" ? "SCORE" : "PERF"} #ID-
-                {selectedNote.id} #MIDI-{selectedNote.midi}
+            <div className="flex items-center gap-3 bg-emerald-500/10 px-4 py-2 rounded-lg border border-emerald-500/30 shadow-lg text-[10px] text-emerald-400">
+              <span className="flex items-center gap-2 border-r border-emerald-500/20 pr-3">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                {selectedNote.panel === "score" ? "SCORE" : "PERF"} NODE
               </span>
-            </span>
+              <span className="text-zinc-100 flex items-center gap-3 tabular-nums font-mono">
+                <ChevronLeft className="w-3 h-3 text-emerald-500/40" />
+                ID #{selectedNote.id}
+                <ChevronRight className="w-3 h-3 text-emerald-500/40" />
+              </span>
+              {(selectedNote.panel === "score"
+                ? scoreUnmappedIds.has(selectedNote.id)
+                : perfUnmappedIds.has(selectedNote.id)) && (
+                <span className="ml-2 flex items-center gap-1.5 px-2 py-0.5 bg-red-500/20 text-red-400 rounded-md border border-red-500/30 text-[8px] font-black uppercase">
+                  <AlertCircle className="w-3 h-3" /> UNMAPPED
+                </span>
+              )}
+            </div>
           )}
         </div>
         <div className="flex gap-10 items-center">

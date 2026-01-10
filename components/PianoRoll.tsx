@@ -1,9 +1,9 @@
-
-import React, { useRef, useEffect, useCallback } from 'react';
-import { MidiData, ViewState, MidiNote } from '../types';
+import React, { useRef, useEffect, useCallback } from "react";
+import { MidiData, ViewState, MidiNote } from "../types";
 
 interface PianoRollProps {
   data: MidiData | null;
+  unmappedNoteIds?: Set<number>;
   viewState: ViewState;
   selectedNoteId: number | null;
   playheadTime: number | null;
@@ -11,12 +11,13 @@ interface PianoRollProps {
   onNoteClick: (note: MidiNote) => void;
   onBlankClick: () => void;
   onScroll: (deltaX: number, deltaY: number) => void;
-  onZoom: (type: 'X' | 'Y', factor: number, centerCoord: number) => void;
+  onZoom: (type: "X" | "Y", factor: number, centerCoord: number) => void;
   label: string;
 }
 
 const PianoRoll: React.FC<PianoRollProps> = ({
   data,
+  unmappedNoteIds,
   viewState,
   selectedNoteId,
   playheadTime,
@@ -25,20 +26,21 @@ const PianoRoll: React.FC<PianoRollProps> = ({
   onBlankClick,
   onScroll,
   onZoom,
-  label
+  label,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const NOTES_IN_OCTAVE = 12;
-  const BLACK_KEYS = [1, 3, 6, 8, 10]; 
+  const BLACK_KEYS = [1, 3, 6, 8, 10];
 
-  const isSharp = (pitch: number) => BLACK_KEYS.includes(pitch % NOTES_IN_OCTAVE);
+  const isSharp = (pitch: number) =>
+    BLACK_KEYS.includes(pitch % NOTES_IN_OCTAVE);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
     const { width, height } = canvas;
@@ -52,10 +54,10 @@ const PianoRoll: React.FC<PianoRollProps> = ({
 
     for (let pitch = startMidi; pitch <= endMidi; pitch++) {
       const y = height - (pitch - scrollY + 1) * zoomY;
-      ctx.fillStyle = isSharp(pitch) ? '#08080a' : '#0e0e11';
+      ctx.fillStyle = isSharp(pitch) ? "#08080a" : "#0e0e11";
       ctx.fillRect(0, y, width, zoomY);
 
-      ctx.strokeStyle = '#18181b';
+      ctx.strokeStyle = "#18181b";
       ctx.lineWidth = 0.5;
       ctx.beginPath();
       ctx.moveTo(0, y);
@@ -63,14 +65,14 @@ const PianoRoll: React.FC<PianoRollProps> = ({
       ctx.stroke();
 
       if (pitch % 12 === 0) {
-        ctx.strokeStyle = '#27272a';
+        ctx.strokeStyle = "#27272a";
         ctx.lineWidth = 1;
         ctx.strokeRect(0, y, width, 0.5);
       }
     }
 
     // Vertical grid (Seconds)
-    ctx.strokeStyle = '#18181b';
+    ctx.strokeStyle = "#18181b";
     const startTime = Math.floor(scrollX);
     const endTime = Math.ceil(scrollX + width / zoomX);
     for (let t = startTime; t <= endTime; t++) {
@@ -83,7 +85,7 @@ const PianoRoll: React.FC<PianoRollProps> = ({
 
     // Static Anchor Line (Apparent white line)
     ctx.setLineDash([5, 5]);
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)'; // More apparent, less opaque
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.55)"; // More apparent, less opaque
     ctx.lineWidth = 1.2;
     ctx.beginPath();
     ctx.moveTo(anchorX, 0);
@@ -93,7 +95,7 @@ const PianoRoll: React.FC<PianoRollProps> = ({
 
     // 2. Draw Notes
     if (data) {
-      data.notes.forEach(note => {
+      data.notes.forEach((note) => {
         const x = (note.start - scrollX) * zoomX;
         const w = note.duration * zoomX;
         const y = height - (note.pitch - scrollY + 1) * zoomY;
@@ -102,24 +104,42 @@ const PianoRoll: React.FC<PianoRollProps> = ({
         if (x + w < 0 || x > width) return;
 
         const isSelected = selectedNoteId === note.id;
-        
+        const isUnmapped = unmappedNoteIds?.has(note.id);
+
         const gradient = ctx.createLinearGradient(x, y, x, y + h);
-        gradient.addColorStop(0, isSelected ? '#60a5fa' : '#34d399');
-        gradient.addColorStop(1, isSelected ? '#2563eb' : '#059669');
+        if (isUnmapped) {
+          gradient.addColorStop(0, isSelected ? "#ef4444" : "#71717a");
+          gradient.addColorStop(1, isSelected ? "#991b1b" : "#3f3f46");
+        } else {
+          gradient.addColorStop(0, isSelected ? "#60a5fa" : "#34d399");
+          gradient.addColorStop(1, isSelected ? "#2563eb" : "#059669");
+        }
 
         ctx.fillStyle = gradient;
-        ctx.strokeStyle = isSelected ? '#ffffff' : '#059669';
-        ctx.lineWidth = isSelected ? 2.5 : 0.5;
+        ctx.strokeStyle = isUnmapped
+          ? "#ef4444"
+          : isSelected
+          ? "#ffffff"
+          : "#059669";
+        ctx.lineWidth = isSelected ? 2.5 : isUnmapped ? 1.5 : 0.5;
 
         ctx.beginPath();
         ctx.roundRect(x, y, Math.max(4, w), h, 3);
         ctx.fill();
         ctx.stroke();
 
+        // Optional Flag/Highlight for unmapped notes
+        if (isUnmapped) {
+          ctx.fillStyle = "#ef4444";
+          ctx.beginPath();
+          ctx.arc(x + 2, y + 2, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
         if (isSelected || zoomY > 20) {
-            ctx.fillStyle = isSelected ? 'white' : 'rgba(255,255,255,0.7)';
-            ctx.font = 'bold 10px "JetBrains Mono", monospace';
-            ctx.fillText(`${note.id}`, x + 5, y + 12);
+          ctx.fillStyle = isSelected ? "white" : "rgba(255,255,255,0.7)";
+          ctx.font = 'bold 10px "JetBrains Mono", monospace';
+          ctx.fillText(`${note.id}`, x + (isUnmapped ? 8 : 5), y + 12);
         }
       });
     }
@@ -128,10 +148,10 @@ const PianoRoll: React.FC<PianoRollProps> = ({
     if (playheadTime !== null) {
       const px = (playheadTime - scrollX) * zoomX;
       if (px >= 0 && px <= width) {
-        ctx.strokeStyle = '#f87171';
+        ctx.strokeStyle = "#f87171";
         ctx.lineWidth = 2.5;
         ctx.shadowBlur = 10;
-        ctx.shadowColor = 'rgba(248, 113, 113, 0.9)';
+        ctx.shadowColor = "rgba(248, 113, 113, 0.9)";
         ctx.beginPath();
         ctx.moveTo(px, 0);
         ctx.lineTo(px, height);
@@ -139,7 +159,7 @@ const PianoRoll: React.FC<PianoRollProps> = ({
         ctx.shadowBlur = 0;
       }
     }
-  }, [data, viewState, selectedNoteId, playheadTime, anchorX]);
+  }, [data, unmappedNoteIds, viewState, selectedNoteId, playheadTime, anchorX]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -149,9 +169,9 @@ const PianoRoll: React.FC<PianoRollProps> = ({
         draw();
       }
     };
-    window.addEventListener('resize', handleResize);
+    window.addEventListener("resize", handleResize);
     handleResize();
-    return () => window.removeEventListener('resize', handleResize);
+    return () => window.removeEventListener("resize", handleResize);
   }, [draw]);
 
   useEffect(() => draw(), [draw]);
@@ -159,7 +179,7 @@ const PianoRoll: React.FC<PianoRollProps> = ({
   const handleWheel = (e: React.WheelEvent) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    
+
     const isZooming = e.altKey || e.metaKey || e.ctrlKey;
     const rect = canvas.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
@@ -171,9 +191,9 @@ const PianoRoll: React.FC<PianoRollProps> = ({
       const factor = e.deltaY < 0 ? zoomFactor : 1 / zoomFactor;
 
       if (e.altKey) {
-        onZoom('Y', factor, canvas.height - mouseY);
+        onZoom("Y", factor, canvas.height - mouseY);
       } else {
-        onZoom('X', factor, mouseX);
+        onZoom("X", factor, mouseX);
       }
     } else {
       // Pass deltas to parent to allow perfectly relative sync scrolling
@@ -189,12 +209,16 @@ const PianoRoll: React.FC<PianoRollProps> = ({
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     const time = x / viewState.zoomX + viewState.scrollX;
-    const pitch = viewState.scrollY + (canvasRef.current!.height - y) / viewState.zoomY;
+    const pitch =
+      viewState.scrollY + (canvasRef.current!.height - y) / viewState.zoomY;
 
-    const clickedNote = data.notes.find(note => 
-      time >= note.start && time <= note.start + note.duration && Math.floor(pitch) === note.pitch
+    const clickedNote = data.notes.find(
+      (note) =>
+        time >= note.start &&
+        time <= note.start + note.duration &&
+        Math.floor(pitch) === note.pitch
     );
-    
+
     if (clickedNote) {
       onNoteClick(clickedNote);
     } else {
@@ -203,11 +227,19 @@ const PianoRoll: React.FC<PianoRollProps> = ({
   };
 
   return (
-    <div ref={containerRef} className="relative w-full h-full bg-[#08080a] overflow-hidden">
+    <div
+      ref={containerRef}
+      className="relative w-full h-full bg-[#08080a] overflow-hidden"
+    >
       <div className="absolute top-5 left-5 px-3 py-1.5 bg-zinc-950/90 rounded-lg text-[9px] text-zinc-500 font-black tracking-[0.3em] z-10 border border-white/[0.2] pointer-events-none uppercase shadow-2xl">
         {label}
       </div>
-      <canvas ref={canvasRef} onWheel={handleWheel} onClick={handleClick} className="cursor-crosshair w-full h-full block" />
+      <canvas
+        ref={canvasRef}
+        onWheel={handleWheel}
+        onClick={handleClick}
+        className="cursor-crosshair w-full h-full block"
+      />
     </div>
   );
 };
