@@ -64,7 +64,7 @@ const PianoRoll: React.FC<PianoRollProps> = ({
       ctx.lineTo(width, y);
       ctx.stroke();
 
-      if (pitch % 12 === 0) {
+      if (pitch % 12 === 11) {
         ctx.strokeStyle = "#27272a";
         ctx.lineWidth = 1;
         ctx.strokeRect(0, y, width, 0.5);

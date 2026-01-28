@@ -292,6 +292,7 @@ const App: React.FC = () => {
     const data = await parseMidiFile(file);
     if (data) setScoreMidi(data);
     else alert("Error: Invalid MIDI file.");
+    e.target.value = "";
   };
 
   const handlePerfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -300,6 +301,7 @@ const App: React.FC = () => {
     const data = await parseMidiFile(file);
     if (data) setPerfMidi(data);
     else alert("Error: Invalid MIDI file.");
+    e.target.value = "";
   };
 
   const clearAll = () => {
@@ -315,7 +317,7 @@ const App: React.FC = () => {
     if (gtInputRef.current) gtInputRef.current.value = "";
   };
 
-  const renderLines = () => {
+  const renderedLines = useMemo(() => {
     if (
       visibility === "none" ||
       !scoreMidi ||
@@ -427,7 +429,16 @@ const App: React.FC = () => {
       }
     }
     return lines;
-  };
+  }, [
+    alignment,
+    gtAlignment,
+    scoreMidi,
+    perfMidi,
+    scoreViewState,
+    perfViewState,
+    visibility,
+    selectedNote,
+  ]);
 
   const handleNoteClick = (n: MidiNote, panel: "score" | "perf") => {
     setSelectedNote((prev) =>
@@ -489,8 +500,11 @@ const App: React.FC = () => {
                 id="a-up"
                 type="file"
                 onChange={async (e) => {
-                  if (e.target.files?.[0])
-                    setAlignment(await parseAlignmentCsv(e.target.files[0]));
+                  if (e.target.files?.[0]) {
+                    const data = await parseAlignmentCsv(e.target.files[0]);
+                    setAlignment(data);
+                  }
+                  e.target.value = "";
                 }}
                 className="hidden"
               />
@@ -507,8 +521,11 @@ const App: React.FC = () => {
                 id="gt-up"
                 type="file"
                 onChange={async (e) => {
-                  if (e.target.files?.[0])
-                    setGtAlignment(await parseAlignmentCsv(e.target.files[0]));
+                  if (e.target.files?.[0]) {
+                    const data = await parseAlignmentCsv(e.target.files[0]);
+                    setGtAlignment(data);
+                  }
+                  e.target.value = "";
                 }}
                 className="hidden"
               />
@@ -587,7 +604,7 @@ const App: React.FC = () => {
           className="flex-1 flex flex-col min-h-0 relative"
         >
           <svg className="absolute inset-0 w-full h-full pointer-events-none z-30 drop-shadow-[0_0_10px_rgba(0,0,0,0.8)]">
-            {renderLines()}
+            {renderedLines}
           </svg>
 
           <div className="flex-1 relative group border-b border-white/[0.04]">
@@ -767,9 +784,8 @@ const App: React.FC = () => {
                 ID-{selectedNote.id}, MIDI-{selectedNote.midi}
                 <ChevronRight className="w-3 h-3 text-emerald-500/40" />
               </span>
-              <span className="text-zinc-100 flex items-center gap-3 tabular-nums font-mono"></span>
               {(selectedNote.panel === "score"
-                ? scoreUnmappedIds.has(selectedNote.id) && <></>
+                ? scoreUnmappedIds.has(selectedNote.id)
                 : perfUnmappedIds.has(selectedNote.id)) && (
                 <span className="ml-2 flex items-center gap-1.5 px-2 py-0.5 bg-red-500/20 text-red-400 rounded-md border border-red-500/30 text-[8px] font-black uppercase">
                   <AlertCircle className="w-3 h-3" /> UNMAPPED
