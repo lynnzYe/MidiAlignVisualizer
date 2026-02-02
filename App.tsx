@@ -55,6 +55,25 @@ const App: React.FC = () => {
     scrollX: 0,
     scrollY: 60,
   });
+  const [playback, setPlayback] = useState<PlaybackState>({
+    isPlaying: false,
+    startTime: 0,
+    startOffset: 0,
+    activePanel: null,
+  });
+  const scoreViewStateRef = useRef(scoreViewState);
+  const perfViewStateRef = useRef(perfViewState);
+  const playbackRef = useRef(playback);
+  useEffect(() => {
+    scoreViewStateRef.current = scoreViewState;
+  }, [scoreViewState]);
+  useEffect(() => {
+    perfViewStateRef.current = perfViewState;
+  }, [perfViewState]);
+  useEffect(() => {
+    playbackRef.current = playback;
+  }, [playback]);
+
   const [selectedNote, setSelectedNote] = useState<{
     id: number;
     midi: number;
@@ -63,12 +82,6 @@ const App: React.FC = () => {
   const [visibility, setVisibility] = useState<AlignmentVisibility>("full");
   const [syncScroll, setSyncScroll] = useState(false);
 
-  const [playback, setPlayback] = useState<PlaybackState>({
-    isPlaying: false,
-    startTime: 0,
-    startOffset: 0,
-    activePanel: null,
-  });
   const [playheadTime, setPlayheadTime] = useState(0);
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -111,6 +124,26 @@ const App: React.FC = () => {
     return result;
   }, [perfMidi, alignment]);
 
+  const togglePlayback = useCallback((panel: "score" | "perf") => {
+    const currentPlayback = playbackRef.current;
+    if (currentPlayback.isPlaying && currentPlayback.activePanel === panel) {
+      setPlayback((prev) => ({ ...prev, isPlaying: false }));
+    } else {
+      const view =
+        panel === "score"
+          ? scoreViewStateRef.current
+          : perfViewStateRef.current;
+      // When pressing play, red line jumps to where the dotted white line is at
+      const startTimeAtAnchor = view.scrollX + PLAYHEAD_ANCHOR_X / view.zoomX;
+      setPlayback({
+        isPlaying: true,
+        startTime: performance.now(),
+        startOffset: startTimeAtAnchor,
+        activePanel: panel,
+      });
+      setPlayheadTime(startTimeAtAnchor);
+    }
+  }, []);
   // Hotkeys
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -124,8 +157,9 @@ const App: React.FC = () => {
       }
       if (e.key === " ") {
         e.preventDefault();
-        togglePlayback(playback.activePanel || "score");
+        togglePlayback(playbackRef.current.activePanel || "score");
       }
+
       // MoveID: Keyboard navigation for selected note
       if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && selectedNote) {
         e.preventDefault();
@@ -134,39 +168,56 @@ const App: React.FC = () => {
 
         const currentId = selectedNote.id;
         const newId = e.key === "ArrowRight" ? currentId + 1 : currentId - 1;
-        const newPitch = midiData.notes[newId].pitch;
 
         if (newId >= 0 && newId < midiData.notes.length) {
-          setSelectedNote({ ...selectedNote, id: newId, midi: newPitch });
+          const nextNote = midiData.notes[newId];
+          setSelectedNote({ ...selectedNote, id: newId });
+
+          // MoveID: Auto-scroll to newly selected note
+          const viewState =
+            selectedNote.panel === "score"
+              ? scoreViewStateRef.current
+              : perfViewStateRef.current;
+          const setViewState =
+            selectedNote.panel === "score"
+              ? setScoreViewState
+              : setPerfViewState;
+
+          // Position the note near the anchor or center
+          const targetScrollX =
+            nextNote.start - PLAYHEAD_ANCHOR_X / viewState.zoomX;
+          const targetScrollY = nextNote.pitch - 60 / viewState.zoomY; // Approx center vertical
+
+          setViewState((prev) => ({
+            ...prev,
+            scrollX: targetScrollX,
+            scrollY: Math.max(0, Math.min(127, targetScrollY)),
+          }));
         }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [
-    playback.activePanel,
-    playback.isPlaying,
-    selectedNote,
-    scoreMidi,
-    perfMidi,
-  ]);
+  }, [togglePlayback, selectedNote, scoreMidi, perfMidi]);
 
   // Playback Loop
   useEffect(() => {
     const animate = (time: number) => {
-      if (playback.isPlaying) {
-        const elapsed = (time - playback.startTime) / 1000;
-        const currentPos = playback.startOffset + elapsed;
+      const currentPlayback = playbackRef.current;
+      if (currentPlayback.isPlaying) {
+        const elapsed = (time - currentPlayback.startTime) / 1000;
+        const currentPos = currentPlayback.startOffset + elapsed;
         setPlayheadTime(currentPos);
 
-        if (playback.activePanel === "score") {
+        if (currentPlayback.activePanel === "score") {
           setScoreViewState((prev) => ({
             ...prev,
             scrollX: currentPos - PLAYHEAD_ANCHOR_X / prev.zoomX,
           }));
           if (syncScroll) {
             const sNote = scoreMidi?.notes.find(
-              (n) => n.start <= currentPos && n.start + n.duration >= currentPos
+              (n) =>
+                n.start <= currentPos && n.start + n.duration >= currentPos,
             );
             if (sNote) {
               const pId = alignment.find((a) => a.scoreId === sNote.id)?.perfId;
@@ -178,14 +229,15 @@ const App: React.FC = () => {
                 }));
             }
           }
-        } else if (playback.activePanel === "perf") {
+        } else if (currentPlayback.activePanel === "perf") {
           setPerfViewState((prev) => ({
             ...prev,
             scrollX: currentPos - PLAYHEAD_ANCHOR_X / prev.zoomX,
           }));
           if (syncScroll) {
             const pNote = perfMidi?.notes.find(
-              (n) => n.start <= currentPos && n.start + n.duration >= currentPos
+              (n) =>
+                n.start <= currentPos && n.start + n.duration >= currentPos,
             );
             if (pNote) {
               const sId = alignment.find((a) => a.perfId === pNote.id)?.scoreId;
@@ -203,30 +255,14 @@ const App: React.FC = () => {
     };
     requestRef.current = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(requestRef.current!);
-  }, [playback, syncScroll, scoreMidi, perfMidi, alignment]);
-
-  const togglePlayback = (panel: "score" | "perf") => {
-    if (playback.isPlaying && playback.activePanel === panel) {
-      setPlayback((prev) => ({ ...prev, isPlaying: false }));
-    } else {
-      const currentView = panel === "score" ? scoreViewState : perfViewState;
-      const startTimeAtAnchor =
-        currentView.scrollX + PLAYHEAD_ANCHOR_X / currentView.zoomX;
-      setPlayback({
-        isPlaying: true,
-        startTime: performance.now(),
-        startOffset: startTimeAtAnchor,
-        activePanel: panel,
-      });
-      setPlayheadTime(startTimeAtAnchor);
-    }
-  };
+  }, [syncScroll, scoreMidi, perfMidi, alignment]);
 
   const handleScroll = useCallback(
     (panel: "score" | "perf", deltaX: number, deltaY: number) => {
-      const isPlaybackActive = playback.isPlaying;
+      const currentPlayback = playbackRef.current;
+      const isPlaybackActive = currentPlayback.isPlaying;
       const isThisPanelPlaying =
-        isPlaybackActive && playback.activePanel === panel;
+        isPlaybackActive && currentPlayback.activePanel === panel;
 
       if (panel === "score") {
         // Allow independent X-scroll on a panel if it's not the playhead driver
@@ -258,7 +294,7 @@ const App: React.FC = () => {
         }
       }
     },
-    [syncScroll, playback]
+    [syncScroll],
   );
 
   const handleZoom = useCallback(
@@ -266,7 +302,7 @@ const App: React.FC = () => {
       panel: "score" | "perf",
       type: "X" | "Y",
       factor: number,
-      centerCoord: number
+      centerCoord: number,
     ) => {
       const updateFn = panel === "score" ? setScoreViewState : setPerfViewState;
       updateFn((prev) => {
@@ -283,7 +319,7 @@ const App: React.FC = () => {
         }
       });
     },
-    []
+    [],
   );
 
   const handleScoreUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -345,7 +381,7 @@ const App: React.FC = () => {
       const isCorrect =
         hasGt &&
         gtAlignment.some(
-          (gt) => gt.scoreId === pair.scoreId && gt.perfId === pair.perfId
+          (gt) => gt.scoreId === pair.scoreId && gt.perfId === pair.perfId,
         );
 
       let color = isCorrect ? "#10b981" : hasGt ? "#facc15" : "#4ade80";
@@ -380,7 +416,7 @@ const App: React.FC = () => {
           strokeWidth={strokeWidth}
           strokeOpacity={lineOpacity}
           className="transition-all duration-300 ease-out"
-        />
+        />,
       );
     });
 
@@ -388,14 +424,14 @@ const App: React.FC = () => {
       const pair = gtAlignment.find(
         (gt) =>
           (selectedNote.panel === "score" && gt.scoreId === selectedNote.id) ||
-          (selectedNote.panel === "perf" && gt.perfId === selectedNote.id)
+          (selectedNote.panel === "perf" && gt.perfId === selectedNote.id),
       );
 
       if (pair && pair.scoreId !== -1 && pair.perfId !== -1) {
         const sNote = scoreMidi.notes.find((n) => n.id === pair.scoreId);
         const pNote = perfMidi.notes.find((n) => n.id === pair.perfId);
         const isAlreadyDrawn = alignment.some(
-          (a) => a.scoreId === pair.scoreId && a.perfId === pair.perfId
+          (a) => a.scoreId === pair.scoreId && a.perfId === pair.perfId,
         );
 
         if (sNote && pNote && !isAlreadyDrawn) {
@@ -423,7 +459,7 @@ const App: React.FC = () => {
               strokeWidth={3}
               strokeOpacity={1}
               strokeDasharray="6,4"
-            />
+            />,
           );
         }
       }
@@ -444,7 +480,7 @@ const App: React.FC = () => {
     setSelectedNote((prev) =>
       prev?.id === n.id && prev?.panel === panel
         ? null
-        : { id: n.id, midi: n.pitch, panel }
+        : { id: n.id, midi: n.pitch, panel },
     );
   };
 
@@ -650,7 +686,7 @@ const App: React.FC = () => {
                       "score",
                       "X",
                       1.2,
-                      containerRef.current!.clientWidth / 2
+                      containerRef.current!.clientWidth / 2,
                     )
                   }
                   className="p-2 hover:bg-white/10 rounded-xl"
@@ -663,7 +699,7 @@ const App: React.FC = () => {
                       "score",
                       "X",
                       1 / 1.2,
-                      containerRef.current!.clientWidth / 2
+                      containerRef.current!.clientWidth / 2,
                     )
                   }
                   className="p-2 hover:bg-white/10 rounded-xl"
@@ -724,7 +760,7 @@ const App: React.FC = () => {
                       "perf",
                       "X",
                       1.2,
-                      containerRef.current!.clientWidth / 2
+                      containerRef.current!.clientWidth / 2,
                     )
                   }
                   className="p-2 hover:bg-white/10 rounded-xl"
@@ -737,7 +773,7 @@ const App: React.FC = () => {
                       "perf",
                       "X",
                       1 / 1.2,
-                      containerRef.current!.clientWidth / 2
+                      containerRef.current!.clientWidth / 2,
                     )
                   }
                   className="p-2 hover:bg-white/10 rounded-xl"
