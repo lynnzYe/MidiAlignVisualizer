@@ -13,7 +13,12 @@ import {
   MidiNote,
   PlaybackState,
 } from "./types";
-import { parseMidiFile, parseAlignmentCsv } from "./services/midiService";
+import {
+  parseMidiFile,
+  parseAlignmentCsv,
+  loadMidiFromUrl,
+  loadAlignmentCsvFromUrl,
+} from "./services/midiService";
 import PianoRoll from "./components/PianoRoll";
 import {
   Upload,
@@ -91,6 +96,23 @@ const App: React.FC = () => {
   const perfInputRef = useRef<HTMLInputElement>(null);
   const alignInputRef = useRef<HTMLInputElement>(null);
   const gtInputRef = useRef<HTMLInputElement>(null);
+
+  // Load defaults on mount
+  useEffect(() => {
+    const loadDefaults = async () => {
+      // Assuming these files exist in the public folder
+      const sMidi = await loadMidiFromUrl("/MidiAlignVisualizer/score.mid");
+      const pMidi = await loadMidiFromUrl("/MidiAlignVisualizer/perf.mid");
+      const align = await loadAlignmentCsvFromUrl(
+        "/MidiAlignVisualizer/alignment.csv",
+      );
+
+      if (sMidi) setScoreMidi(sMidi);
+      if (pMidi) setPerfMidi(pMidi);
+      if (align.length > 0) setAlignment(align);
+    };
+    loadDefaults();
+  }, []);
 
   // Unmapped detection logic
   const scoreUnmappedIds = useMemo(() => {
@@ -315,8 +337,11 @@ const App: React.FC = () => {
     const file = e.target.files?.[0];
     if (!file) return;
     const data = await parseMidiFile(file);
-    if (data) setScoreMidi(data);
-    else alert("Error: Invalid MIDI file.");
+    if (data) {
+      setScoreMidi(data);
+      setAlignment([]); // Clear alignment as IDs will be completely different
+      setSelectedNote(null);
+    } else alert("Error: Invalid MIDI file.");
     e.target.value = "";
   };
 
@@ -324,8 +349,11 @@ const App: React.FC = () => {
     const file = e.target.files?.[0];
     if (!file) return;
     const data = await parseMidiFile(file);
-    if (data) setPerfMidi(data);
-    else alert("Error: Invalid MIDI file.");
+    if (data) {
+      setPerfMidi(data);
+      setAlignment([]); // Clear alignment as IDs will be completely different
+      setSelectedNote(null);
+    } else alert("Error: Invalid MIDI file.");
     e.target.value = "";
   };
 

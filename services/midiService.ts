@@ -3,19 +3,14 @@ import { Midi } from '@tonejs/midi';
 import { MidiData, MidiNote, AlignmentTuple } from '../types';
 
 /**
- * Parses a MIDI file and assigns deterministic IDs based on:
- * 1. First note onset (start time)
- * 2. Note pitch (ascending)
+ * Core logic to parse MIDI data from an ArrayBuffer
  */
-export async function parseMidiFile(file: File): Promise<MidiData | null> {
+export function parseMidiBuffer(arrayBuffer: ArrayBuffer): MidiData | null {
   try {
-    const arrayBuffer = await file.arrayBuffer();
-
     // Check for MIDI magic bytes "MThd"
     const view = new Uint8Array(arrayBuffer);
     if (view[0] !== 0x4d || view[1] !== 0x54 || view[2] !== 0x68 || view[3] !== 0x64) {
-      console.warn('File does not appear to be a valid MIDI file (missing MThd header).');
-      // If it looks like it might be the CSV (starting with "scor" or "score"), notify the caller
+      console.warn('Data does not appear to be a valid MIDI (missing MThd header).');
       return null;
     }
 
@@ -51,37 +46,94 @@ export async function parseMidiFile(file: File): Promise<MidiData | null> {
       duration: midi.duration
     };
   } catch (err) {
-    console.error('Error parsing MIDI file:', err);
+    console.error('Error parsing MIDI buffer:', err);
     return null;
   }
 }
 
 /**
- * Parses alignment CSV. Expected format: score_id,perf_id
- * Ignores header if present.
+ * Core logic to parse Alignment CSV from a string
  */
-export async function parseAlignmentCsv(file: File): Promise<AlignmentTuple[]> {
+export function parseCsvText(text: string): AlignmentTuple[] {
   try {
-    if (!file) return [];
-    const text = await file.text();
-    const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
+    // Remove Byte Order Mark (BOM) if present
+    const cleanText = text.replace(/^\uFEFF/, '');
+
+    // Split lines and filter out empty ones
+    const lines = cleanText.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
     const pairs: AlignmentTuple[] = [];
 
     lines.forEach(line => {
-      const parts = line.split(/[,\s]+/).map(p => p.trim());
-      if (parts.length >= 2) {
-        const sId = parseInt(parts[0]);
-        const aId = parseInt(parts[1])
-        const pId = parseInt(parts[2]);
-        if (!isNaN(sId) && !isNaN(pId)) {
-          pairs.push({ scoreId: sId, annotId: aId, perfId: pId });
-        }
+      // Handle both comma and space separators, stripping quotes
+      const parts = line.split(/[,\s]+/).map(p => p.trim().replace(/^["'](.+)["']$/, '$1'));
+
+      let sId = NaN;
+      let pId = NaN;
+
+      if (parts.length >= 3) {
+        // Handle three-column format: score_id, annot_id, perf_id
+        sId = parseInt(parts[0]);
+        pId = parseInt(parts[2]);
+      } else if (parts.length === 2) {
+        // Fallback for standard two-column format: score_id, perf_id
+        sId = parseInt(parts[0]);
+        pId = parseInt(parts[1]);
+      }
+
+      if (!isNaN(sId) && !isNaN(pId)) {
+        pairs.push({ scoreId: sId, annotId: -1, perfId: pId });
       }
     });
 
     return pairs;
   } catch (err) {
-    console.error('Error parsing CSV file:', err);
+    console.error('Error parsing CSV text:', err);
+    return [];
+  }
+}
+
+/**
+ * Parses a MIDI file from an upload
+ */
+export async function parseMidiFile(file: File): Promise<MidiData | null> {
+  const buffer = await file.arrayBuffer();
+  return parseMidiBuffer(buffer);
+}
+
+/**
+ * Parses alignment CSV from an upload
+ */
+export async function parseAlignmentCsv(file: File): Promise<AlignmentTuple[]> {
+  const text = await file.text();
+  return parseCsvText(text);
+}
+
+/**
+ * Fetches and parses a MIDI file from a URL
+ */
+export async function loadMidiFromUrl(url: string): Promise<MidiData | null> {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Failed to fetch ${url}`);
+    const buffer = await response.arrayBuffer();
+    return parseMidiBuffer(buffer);
+  } catch (e) {
+    console.error(e);
+    return null;
+  }
+}
+
+/**
+ * Fetches and parses an alignment CSV from a URL
+ */
+export async function loadAlignmentCsvFromUrl(url: string): Promise<AlignmentTuple[]> {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Failed to fetch ${url}`);
+    const text = await response.text();
+    return parseCsvText(text);
+  } catch (e) {
+    console.error(e);
     return [];
   }
 }
