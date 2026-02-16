@@ -182,17 +182,6 @@ const App: React.FC = () => {
             selectedNote.panel === "score"
               ? setScoreViewState
               : setPerfViewState;
-
-          // Position the note near the anchor or center
-          const targetScrollX =
-            nextNote.start - PLAYHEAD_ANCHOR_X / viewState.zoomX;
-          const targetScrollY = nextNote.pitch - 60 / viewState.zoomY; // Approx center vertical
-
-          setViewState((prev) => ({
-            ...prev,
-            scrollX: targetScrollX,
-            scrollY: Math.max(0, Math.min(127, targetScrollY)),
-          }));
         }
       }
     };
