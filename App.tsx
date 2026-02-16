@@ -106,10 +106,14 @@ const App: React.FC = () => {
       const align = await loadAlignmentCsvFromUrl(
         "/MidiAlignVisualizer/alignment.csv",
       );
+      const gtalign = await loadAlignmentCsvFromUrl(
+        "/MidiAlignVisualizer/gt_alignment.csv",
+      );
 
       if (sMidi) setScoreMidi(sMidi);
       if (pMidi) setPerfMidi(pMidi);
       if (align.length > 0) setAlignment(align);
+      if (gtalign.length > 0) setGtAlignment(gtalign);
     };
     loadDefaults();
   }, []);
@@ -340,6 +344,7 @@ const App: React.FC = () => {
     if (data) {
       setScoreMidi(data);
       setAlignment([]); // Clear alignment as IDs will be completely different
+      setGtAlignment([]); // Clear alignment as IDs will be completely different
       setSelectedNote(null);
     } else alert("Error: Invalid MIDI file.");
     e.target.value = "";
@@ -352,6 +357,7 @@ const App: React.FC = () => {
     if (data) {
       setPerfMidi(data);
       setAlignment([]); // Clear alignment as IDs will be completely different
+      setGtAlignment([]); // Clear alignment as IDs will be completely different
       setSelectedNote(null);
     } else alert("Error: Invalid MIDI file.");
     e.target.value = "";
