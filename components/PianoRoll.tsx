@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useCallback } from "react";
-import { MidiData, ViewState, MidiNote } from "../types";
+import { AlignmentRangeMarks, MidiData, ViewState, MidiNote } from "../types";
 
 interface PianoRollProps {
   data: MidiData | null;
@@ -8,10 +8,13 @@ interface PianoRollProps {
   selectedNoteId: number | null;
   playheadTime: number | null;
   anchorX: number;
+  rangeMarks: AlignmentRangeMarks;
   onNoteClick: (note: MidiNote) => void;
   onBlankClick: () => void;
   onScroll: (deltaX: number, deltaY: number) => void;
   onZoom: (type: "X" | "Y", factor: number, centerCoord: number) => void;
+  onPanelFocus: () => void;
+  onNoteDragStart: (note: MidiNote, clientX: number, clientY: number) => void;
   label: string;
 }
 
@@ -22,10 +25,13 @@ const PianoRoll: React.FC<PianoRollProps> = ({
   selectedNoteId,
   playheadTime,
   anchorX,
+  rangeMarks,
   onNoteClick,
   onBlankClick,
   onScroll,
   onZoom,
+  onPanelFocus,
+  onNoteDragStart,
   label,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -33,9 +39,33 @@ const PianoRoll: React.FC<PianoRollProps> = ({
 
   const NOTES_IN_OCTAVE = 12;
   const BLACK_KEYS = [1, 3, 6, 8, 10];
+  const C_MAJOR_NOTES = [0, 2, 4, 5, 7, 9, 11];
 
   const isSharp = (pitch: number) =>
     BLACK_KEYS.includes(pitch % NOTES_IN_OCTAVE);
+  const isCMajorNote = (pitch: number) =>
+    C_MAJOR_NOTES.includes(pitch % NOTES_IN_OCTAVE);
+
+  const getNoteAtCanvasPoint = useCallback(
+    (x: number, y: number) => {
+      if (!data || !canvasRef.current) return null;
+
+      const time = x / viewState.zoomX + viewState.scrollX;
+      const pitch =
+        viewState.scrollY +
+        (canvasRef.current.height - y) / viewState.zoomY;
+
+      return (
+        data.notes.find(
+          (note) =>
+            time >= note.start &&
+            time <= note.start + note.duration &&
+            Math.floor(pitch) === note.pitch,
+        ) ?? null
+      );
+    },
+    [data, viewState],
+  );
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -54,29 +84,43 @@ const PianoRoll: React.FC<PianoRollProps> = ({
 
     for (let pitch = startMidi; pitch <= endMidi; pitch++) {
       const y = height - (pitch - scrollY + 1) * zoomY;
-      ctx.fillStyle = isSharp(pitch) ? "#08080a" : "#0e0e11";
+      ctx.fillStyle = isCMajorNote(pitch) ? "#101014" : "#050507";
       ctx.fillRect(0, y, width, zoomY);
 
-      ctx.strokeStyle = "#18181b";
+      ctx.strokeStyle = isCMajorNote(pitch)
+        ? "rgba(255,255,255,0.075)"
+        : "rgba(255,255,255,0.025)";
       ctx.lineWidth = 0.5;
       ctx.beginPath();
       ctx.moveTo(0, y);
       ctx.lineTo(width, y);
       ctx.stroke();
 
-      if (pitch % 12 === 11) {
-        ctx.strokeStyle = "#27272a";
-        ctx.lineWidth = 1;
-        ctx.strokeRect(0, y, width, 0.5);
+      if (pitch % 12 === 0) {
+        ctx.strokeStyle = "rgba(255,255,255,0.22)";
+        ctx.lineWidth = 1.25;
+        ctx.beginPath();
+        ctx.moveTo(0, y + zoomY);
+        ctx.lineTo(width, y + zoomY);
+        ctx.stroke();
       }
     }
 
-    // Vertical grid (Seconds)
-    ctx.strokeStyle = "#18181b";
-    const startTime = Math.floor(scrollX);
-    const endTime = Math.ceil(scrollX + width / zoomX);
-    for (let t = startTime; t <= endTime; t++) {
+    // Vertical grid (beats and bars, assuming quarter-note beat timing).
+    const beatStep = 0.25;
+    const startTime = Math.floor(scrollX / beatStep) * beatStep;
+    const endTime = scrollX + width / zoomX;
+    for (let t = startTime; t <= endTime + beatStep; t += beatStep) {
       const x = (t - scrollX) * zoomX;
+      const beatIndex = Math.round(t / beatStep);
+      const isBar = beatIndex % 16 === 0;
+      const isBeat = beatIndex % 4 === 0;
+      ctx.strokeStyle = isBar
+        ? "rgba(255,255,255,0.34)"
+        : isBeat
+        ? "rgba(255,255,255,0.16)"
+        : "rgba(255,255,255,0.055)";
+      ctx.lineWidth = isBar ? 1.35 : isBeat ? 0.9 : 0.5;
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, height);
@@ -92,6 +136,37 @@ const PianoRoll: React.FC<PianoRollProps> = ({
     ctx.lineTo(anchorX, height);
     ctx.stroke();
     ctx.setLineDash([]);
+
+    // Alignment segment marks
+    const sortedMarks = [rangeMarks.left, rangeMarks.right]
+      .filter((mark): mark is number => mark !== null)
+      .sort((a, b) => a - b);
+    if (sortedMarks.length === 2) {
+      const x1 = (sortedMarks[0] - scrollX) * zoomX;
+      const x2 = (sortedMarks[1] - scrollX) * zoomX;
+      ctx.fillStyle = "rgba(239, 68, 68, 0.08)";
+      ctx.fillRect(Math.min(x1, x2), 0, Math.abs(x2 - x1), height);
+    }
+
+    sortedMarks.forEach((mark, index) => {
+      const x = (mark - scrollX) * zoomX;
+      if (x < -20 || x > width + 20) return;
+
+      ctx.setLineDash([4, 5]);
+      ctx.strokeStyle = "rgba(248, 113, 113, 0.95)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.fillStyle = "rgba(127, 29, 29, 0.85)";
+      ctx.fillRect(x + 5, 8, 16, 16);
+      ctx.fillStyle = "#fecaca";
+      ctx.font = 'bold 9px "JetBrains Mono", monospace';
+      ctx.fillText(index === 0 ? "L" : "R", x + 10, 20);
+    });
 
     // 2. Draw Notes
     if (data) {
@@ -159,7 +234,15 @@ const PianoRoll: React.FC<PianoRollProps> = ({
         ctx.shadowBlur = 0;
       }
     }
-  }, [data, unmappedNoteIds, viewState, selectedNoteId, playheadTime, anchorX]);
+  }, [
+    data,
+    unmappedNoteIds,
+    viewState,
+    selectedNoteId,
+    playheadTime,
+    anchorX,
+    rangeMarks,
+  ]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -204,25 +287,28 @@ const PianoRoll: React.FC<PianoRollProps> = ({
   };
 
   const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    onPanelFocus();
     if (!data) return;
     const rect = canvasRef.current!.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    const time = x / viewState.zoomX + viewState.scrollX;
-    const pitch =
-      viewState.scrollY + (canvasRef.current!.height - y) / viewState.zoomY;
-
-    const clickedNote = data.notes.find(
-      (note) =>
-        time >= note.start &&
-        time <= note.start + note.duration &&
-        Math.floor(pitch) === note.pitch
-    );
+    const clickedNote = getNoteAtCanvasPoint(x, y);
 
     if (clickedNote) {
       onNoteClick(clickedNote);
     } else {
       onBlankClick();
+    }
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    onPanelFocus();
+    if (e.button !== 0 || !data) return;
+
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const note = getNoteAtCanvasPoint(e.clientX - rect.left, e.clientY - rect.top);
+    if (note) {
+      onNoteDragStart(note, e.clientX, e.clientY);
     }
   };
 
@@ -238,6 +324,7 @@ const PianoRoll: React.FC<PianoRollProps> = ({
         ref={canvasRef}
         onWheel={handleWheel}
         onClick={handleClick}
+        onPointerDown={handlePointerDown}
         className="cursor-crosshair w-full h-full block"
       />
     </div>
