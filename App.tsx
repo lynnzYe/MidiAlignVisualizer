@@ -50,6 +50,7 @@ import {
   startMidiPlayback,
   stopMidiPlayback,
 } from "./services/audioService";
+import { runDP3D1NNRapico } from "./services/rapicoDtw";
 // TODO: check alignment seems to be of wrong order. Id assignment
 const PLAYHEAD_ANCHOR_RATIO = 1 / 5;
 
@@ -121,6 +122,8 @@ const App: React.FC = () => {
   const [alignmentMarks, setAlignmentMarks] =
     useState<AlignmentMarksByPanel>(emptyMarks);
   const [activeEditPanel, setActiveEditPanel] = useState<RollPanel>("score");
+  const [manualUndoStack, setManualUndoStack] = useState<AlignmentTuple[][]>([]);
+  const [manualRedoStack, setManualRedoStack] = useState<AlignmentTuple[][]>([]);
   const [dragLink, setDragLink] = useState<{
     fromPanel: RollPanel;
     note: MidiNote;
@@ -294,6 +297,23 @@ const App: React.FC = () => {
     },
     [anchorX],
   );
+
+  const undoManualAlignment = useCallback(() => {
+    if (manualUndoStack.length === 0) return;
+    const previousAlignment = manualUndoStack[manualUndoStack.length - 1];
+    setManualUndoStack((undoStack) => undoStack.slice(0, -1));
+    setManualRedoStack((redoStack) => [...redoStack, alignment]);
+    setAlignment(previousAlignment);
+  }, [alignment, manualUndoStack]);
+
+  const redoManualAlignment = useCallback(() => {
+    if (manualRedoStack.length === 0) return;
+    const nextAlignment = manualRedoStack[manualRedoStack.length - 1];
+    setManualRedoStack((redoStack) => redoStack.slice(0, -1));
+    setManualUndoStack((undoStack) => [...undoStack, alignment]);
+    setAlignment(nextAlignment);
+  }, [alignment, manualRedoStack]);
+
   // Hotkeys
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -301,6 +321,18 @@ const App: React.FC = () => {
         e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLTextAreaElement;
       if (isInput) return;
+
+      const isUndoKey =
+        (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z";
+      if (isUndoKey) {
+        e.preventDefault();
+        if (e.shiftKey) {
+          redoManualAlignment();
+        } else {
+          undoManualAlignment();
+        }
+        return;
+      }
 
       if (e.key.toLowerCase() === "v") {
         setSyncScroll((prev) => !prev);
@@ -351,6 +383,8 @@ const App: React.FC = () => {
   }, [
     togglePlayback,
     markAlignmentBoundary,
+    undoManualAlignment,
+    redoManualAlignment,
     activeEditPanel,
     selectedNote,
     scoreMidi,
@@ -499,6 +533,8 @@ const App: React.FC = () => {
       setGtAlignment([]); // Clear alignment as IDs will be completely different
       setSelectedNote(null);
       setAlignmentMarks(emptyMarks());
+      setManualUndoStack([]);
+      setManualRedoStack([]);
     } else alert("Error: Invalid MIDI file.");
     e.target.value = "";
   };
@@ -513,6 +549,8 @@ const App: React.FC = () => {
       setGtAlignment([]); // Clear alignment as IDs will be completely different
       setSelectedNote(null);
       setAlignmentMarks(emptyMarks());
+      setManualUndoStack([]);
+      setManualRedoStack([]);
     } else alert("Error: Invalid MIDI file.");
     e.target.value = "";
   };
@@ -524,6 +562,8 @@ const App: React.FC = () => {
     setGtAlignment([]);
     setSelectedNote(null);
     setAlignmentMarks(emptyMarks());
+    setManualUndoStack([]);
+    setManualRedoStack([]);
     setDragLink(null);
     setPlayback((p) => ({ ...p, isPlaying: false }));
     stopMidiPlayback();
@@ -708,7 +748,7 @@ const App: React.FC = () => {
     !!scoreMidi &&
     !!perfMidi;
 
-  const runSegmentAlignmentPlaceholder = () => {
+  const runSegmentAlignment = () => {
     if (!scoreMidi || !perfMidi) return;
 
     const scoreNotes = getNotesInMarkedRange(scoreMidi, "score");
@@ -717,16 +757,7 @@ const App: React.FC = () => {
 
     const scoreIds = new Set(scoreNotes.map((note) => note.id));
     const perfIds = new Set(perfNotes.map((note) => note.id));
-    const count = Math.max(scoreNotes.length, perfNotes.length);
-    const nextPairs: AlignmentTuple[] = [];
-
-    for (let index = 0; index < count; index += 1) {
-      nextPairs.push({
-        scoreId: scoreNotes[index]?.id ?? -1,
-        annotId: -1,
-        perfId: perfNotes[index]?.id ?? -1,
-      });
-    }
+    const nextPairs = runDP3D1NNRapico(scoreNotes, perfNotes);
 
     setAlignment((prev) =>
       sortedAlignment([
@@ -738,6 +769,8 @@ const App: React.FC = () => {
         ...nextPairs,
       ]),
     );
+    setManualUndoStack([]);
+    setManualRedoStack([]);
   };
 
   const commitManualAlignment = (
@@ -750,16 +783,18 @@ const App: React.FC = () => {
         ? { scoreId: fromNote.id, annotId: -1, perfId: targetNote.id }
         : { scoreId: targetNote.id, annotId: -1, perfId: fromNote.id };
 
-    setAlignment((prev) =>
-      sortedAlignment([
+    setAlignment((prev) => {
+      setManualUndoStack((undoStack) => [...undoStack, prev]);
+      setManualRedoStack([]);
+      return sortedAlignment([
         ...prev.filter(
           (existing) =>
             existing.scoreId !== pair.scoreId &&
             existing.perfId !== pair.perfId,
         ),
         pair,
-      ]),
-    );
+      ]);
+    });
   };
 
   const findNearestNoteAtPoint = (
@@ -962,6 +997,8 @@ const App: React.FC = () => {
                   if (e.target.files?.[0]) {
                     const data = await parseAlignmentCsv(e.target.files[0]);
                     setAlignment(data);
+                    setManualUndoStack([]);
+                    setManualRedoStack([]);
                   }
                   e.target.value = "";
                 }}
@@ -1000,7 +1037,7 @@ const App: React.FC = () => {
 
           <div className="flex items-center gap-2 bg-[#1c1c1f] p-1.5 rounded-xl border border-white/[0.04] shadow-inner">
             <button
-              onClick={runSegmentAlignmentPlaceholder}
+              onClick={runSegmentAlignment}
               disabled={!canRunSegmentAlignment}
               className={`btn-modern group ${
                 canRunSegmentAlignment

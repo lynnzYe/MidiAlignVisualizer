@@ -8,6 +8,8 @@ let audioContext: AudioContext | null = null;
 let instrumentPromise: Promise<SoundfontInstrument> | null = null;
 let scheduledNodes: Array<AudioNode & { stop?: (when?: number) => void }> = [];
 
+const DEFAULT_GAIN = 6.2
+
 const getAudioContext = () => {
   if (!audioContext) {
     const AudioContextCtor =
@@ -46,7 +48,7 @@ export const playMidiNotePreview = async (note: MidiNote) => {
     const ac = getAudioContext();
     instrument.play(note.pitch, ac.currentTime, {
       duration: Math.max(0.12, Math.min(note.duration || 0.6, 0.9)),
-      gain: Math.max(0.2, note.velocity || 0.7),
+      gain: Math.max(DEFAULT_GAIN, note.velocity || DEFAULT_GAIN),
     });
   } catch (error) {
     console.warn("Unable to play MIDI preview note.", error);
@@ -83,7 +85,7 @@ export const startMidiPlayback = async (
 
         return instrument.play(note.pitch, when, {
           duration,
-          gain: Math.max(0.2, note.velocity || 0.7),
+          gain: Math.max(DEFAULT_GAIN, note.velocity || DEFAULT_GAIN),
         });
       });
   } catch (error) {
