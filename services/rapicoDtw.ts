@@ -11,6 +11,11 @@ interface ScoreSegment {
   scoreIndices: number[];
 }
 
+interface PathPair extends AlignmentTuple {
+  scoreIndex: number;
+  perfIndex: number;
+}
+
 const makeMatrix = (rows: number, cols: number, value = Number.POSITIVE_INFINITY) =>
   Array.from({ length: rows }, () => Array(cols).fill(value));
 
@@ -64,6 +69,180 @@ const bisectRight = (values: number[], target: number) => {
   return low;
 };
 
+const getSegmentIndex = (segmentStarts: number[], noteIndex: number) =>
+  Math.max(0, bisectRight(segmentStarts, noteIndex) - 1);
+
+const buildNoteIndexMap = (notes: MidiNote[]) =>
+  new Map(notes.map((note, index) => [note.id, index]));
+
+const buildRelativeRankMap = (
+  notes: MidiNote[],
+  noteIndices: number[],
+  nRank: number,
+) => {
+  const sortedByPitchDesc = [...noteIndices].sort((a, b) => {
+    if (notes[b].pitch !== notes[a].pitch) return notes[b].pitch - notes[a].pitch;
+    return notes[a].start - notes[b].start;
+  });
+  const denominator = Math.max(1, sortedByPitchDesc.length - 1);
+  const scale = Math.max(0, nRank - 1);
+
+  return new Map(
+    sortedByPitchDesc.map((noteIndex, rank) => [
+      notes[noteIndex].id,
+      (rank / denominator) * scale,
+    ]),
+  );
+};
+
+const reorderBucketByRtp = (
+  pairs: AlignmentTuple[],
+  scoreNotes: MidiNote[],
+  perfNotes: MidiNote[],
+) => {
+  if (pairs.length < 2) return pairs;
+
+  const scoreNoteIndexById = buildNoteIndexMap(scoreNotes);
+  const perfNoteIndexById = buildNoteIndexMap(perfNotes);
+  const scoreIndices = pairs.flatMap((pair) => {
+    const index = scoreNoteIndexById.get(pair.scoreId);
+    return index === undefined ? [] : [index];
+  });
+  const perfIndices = pairs.flatMap((pair) => {
+    const index = perfNoteIndexById.get(pair.perfId);
+    return index === undefined ? [] : [index];
+  });
+  const nRank = Math.min(scoreIndices.length, perfIndices.length);
+  if (nRank < 2) return pairs;
+
+  const scoreRtp = buildRelativeRankMap(scoreNotes, scoreIndices, nRank);
+  const perfRtp = buildRelativeRankMap(perfNotes, perfIndices, nRank);
+
+  const sortedScoreIds = pairs
+    .map((pair) => pair.scoreId)
+    .sort((a, b) => {
+      const rtpDelta = (scoreRtp.get(a) ?? 0) - (scoreRtp.get(b) ?? 0);
+      if (rtpDelta !== 0) return rtpDelta;
+      return a - b;
+    });
+
+  const sortedPerfIds = pairs
+    .map((pair) => pair.perfId)
+    .sort((a, b) => {
+      const rtpDelta = (perfRtp.get(a) ?? 0) - (perfRtp.get(b) ?? 0);
+      if (rtpDelta !== 0) return rtpDelta;
+      return a - b;
+    });
+
+  return sortedScoreIds.map((scoreId, index) => ({
+    scoreId,
+    annotId: -1,
+    perfId: sortedPerfIds[index],
+  }));
+};
+
+const repairChordOrderingByRtp = (
+  pairs: AlignmentTuple[],
+  scoreNotes: MidiNote[],
+  perfNotes: MidiNote[],
+) => {
+  // Keep the 3D DP timing path intact; only repair note order inside local chord buckets.
+  const { segments: scoreSegments, segmentStarts: scoreSegmentStarts } =
+    groupScoreNotes(scoreNotes);
+  const { segmentStarts: perfSegmentStarts } = groupScoreNotes(perfNotes);
+  const scoreNoteIndexById = buildNoteIndexMap(scoreNotes);
+  const perfNoteIndexById = buildNoteIndexMap(perfNotes);
+  const bucketedPairs = new Map<string, AlignmentTuple[]>();
+  const repairedPairIds = new Set<string>();
+
+  pairs.forEach((pair) => {
+    const scoreIndex = scoreNoteIndexById.get(pair.scoreId);
+    const perfIndex = perfNoteIndexById.get(pair.perfId);
+    if (scoreIndex === undefined || perfIndex === undefined) return;
+
+    const scoreSegmentIndex = getSegmentIndex(scoreSegmentStarts, scoreIndex);
+    if ((scoreSegments[scoreSegmentIndex]?.scoreIndices.length ?? 0) < 2) return;
+
+    const perfSegmentIndex = getSegmentIndex(perfSegmentStarts, perfIndex);
+    const key = `${scoreSegmentIndex}:${perfSegmentIndex}`;
+    const bucket = bucketedPairs.get(key) ?? [];
+    bucket.push(pair);
+    bucketedPairs.set(key, bucket);
+  });
+
+  const repairedPairs: AlignmentTuple[] = [];
+  bucketedPairs.forEach((bucket) => {
+    if (bucket.length < 2) return;
+    bucket.forEach((pair) => repairedPairIds.add(`${pair.scoreId}:${pair.perfId}`));
+    repairedPairs.push(...reorderBucketByRtp(bucket, scoreNotes, perfNotes));
+  });
+
+  return [
+    ...pairs.filter((pair) => !repairedPairIds.has(`${pair.scoreId}:${pair.perfId}`)),
+    ...repairedPairs,
+  ];
+};
+
+const sortNotesForDtw = (notes: MidiNote[]) =>
+  [...notes].sort((a, b) => {
+    if (Math.abs(a.start - b.start) > 0.0001) return a.start - b.start;
+    return a.pitch - b.pitch;
+  });
+
+const sortPairs = (pairs: AlignmentTuple[]) =>
+  [...pairs].sort((a, b) => {
+    if (a.scoreId !== b.scoreId) return a.scoreId - b.scoreId;
+    return a.perfId - b.perfId;
+  });
+
+const keepOneToOnePairs = (pairs: AlignmentTuple[]) => {
+  const usedScoreIds = new Set<number>();
+  const usedPerfIds = new Set<number>();
+  const result: AlignmentTuple[] = [];
+
+  pairs.forEach((pair) => {
+    if (usedScoreIds.has(pair.scoreId) || usedPerfIds.has(pair.perfId)) return;
+    usedScoreIds.add(pair.scoreId);
+    usedPerfIds.add(pair.perfId);
+    result.push(pair);
+  });
+
+  return result;
+};
+
+const fillForwardScoreAlignment = (
+  pathPairs: PathPair[],
+  sortedScore: MidiNote[],
+) => {
+  const sortedPathPairs = [...pathPairs].sort((a, b) => {
+    if (a.scoreIndex !== b.scoreIndex) return a.scoreIndex - b.scoreIndex;
+    return a.perfIndex - b.perfIndex;
+  });
+  const result: AlignmentTuple[] = [];
+  let pathIndex = 0;
+  let currentPerfId = -1;
+
+  sortedScore.forEach((scoreNote, scoreIndex) => {
+    while (
+      pathIndex < sortedPathPairs.length &&
+      sortedPathPairs[pathIndex].scoreIndex <= scoreIndex
+    ) {
+      currentPerfId = sortedPathPairs[pathIndex].perfId;
+      pathIndex += 1;
+    }
+
+    if (currentPerfId !== -1) {
+      result.push({
+        scoreId: scoreNote.id,
+        annotId: -1,
+        perfId: currentPerfId,
+      });
+    }
+  });
+
+  return result;
+};
+
 class DP3D1NNRapicoTs {
   private readonly nScore: number;
   private readonly scoreExpectedOnsets: number[];
@@ -75,7 +254,7 @@ class DP3D1NNRapicoTs {
     this.nScore = scoreNotes.length;
     const { segments, segmentStarts } = groupScoreNotes(scoreNotes);
     this.scoreExpectedOnsets = scoreNotes.map((_, scoreIndex) => {
-      const segmentIndex = Math.max(0, bisectRight(segmentStarts, scoreIndex) - 1);
+      const segmentIndex = getSegmentIndex(segmentStarts, scoreIndex);
       return segments[segmentIndex]?.scoreOnset ?? scoreNotes[scoreIndex].start;
     });
 
@@ -233,24 +412,105 @@ export const runDP3D1NNRapico = (
 ): AlignmentTuple[] => {
   if (scoreNotes.length === 0 || perfNotes.length === 0) return [];
 
-  const sortedScore = [...scoreNotes].sort((a, b) => {
-    if (Math.abs(a.start - b.start) > 0.0001) return a.start - b.start;
-    return a.pitch - b.pitch;
-  });
-  const sortedPerf = [...perfNotes].sort((a, b) => {
-    if (Math.abs(a.start - b.start) > 0.0001) return a.start - b.start;
-    return a.pitch - b.pitch;
-  });
-
+  const sortedScore = sortNotesForDtw(scoreNotes);
+  const sortedPerf = sortNotesForDtw(perfNotes);
   const model = new DP3D1NNRapicoTs(sortedScore);
   sortedPerf.forEach((tap) => model.predict(tap));
 
-  return model
+  const pathPairs = model
     .getAlignmentPath()
     .map(([scoreIndex, perfIndex]) => ({
+      scoreIndex,
+      perfIndex,
       scoreId: sortedScore[scoreIndex]?.id ?? -1,
       annotId: -1,
       perfId: sortedPerf[perfIndex]?.id ?? -1,
     }))
     .filter((pair) => pair.scoreId !== -1 && pair.perfId !== -1);
+
+  const repairedPathPairs = repairChordOrderingByRtp(
+    keepOneToOnePairs(pathPairs),
+    sortedScore,
+    sortedPerf,
+  );
+  const repairedPathPairByScoreId = new Map(
+    repairedPathPairs.map((pair) => [pair.scoreId, pair.perfId]),
+  );
+
+  return fillForwardScoreAlignment(
+    pathPairs.map((pair) => ({
+      ...pair,
+      perfId: repairedPathPairByScoreId.get(pair.scoreId) ?? pair.perfId,
+    })),
+    sortedScore,
+  );
+};
+
+export const runGuidedDP3D1NNRapico = (
+  scoreNotes: MidiNote[],
+  perfNotes: MidiNote[],
+  guidePairs: AlignmentTuple[] = [],
+): AlignmentTuple[] => {
+  if (guidePairs.length === 0) {
+    return runDP3D1NNRapico(scoreNotes, perfNotes);
+  }
+
+  const sortedScore = sortNotesForDtw(scoreNotes);
+  const sortedPerf = sortNotesForDtw(perfNotes);
+  const scoreIndexById = buildNoteIndexMap(sortedScore);
+  const perfIndexById = buildNoteIndexMap(sortedPerf);
+  const monotonicGuides = guidePairs
+    .flatMap((pair) => {
+      const scoreIndex = scoreIndexById.get(pair.scoreId);
+      const perfIndex = perfIndexById.get(pair.perfId);
+      return scoreIndex === undefined || perfIndex === undefined
+        ? []
+        : [{ pair, scoreIndex, perfIndex }];
+    })
+    .sort((a, b) => {
+      if (a.scoreIndex !== b.scoreIndex) return a.scoreIndex - b.scoreIndex;
+      return a.perfIndex - b.perfIndex;
+    })
+    .reduce<
+      Array<{ pair: AlignmentTuple; scoreIndex: number; perfIndex: number }>
+    >((guides, guide) => {
+      const previous = guides[guides.length - 1];
+      if (
+        !previous ||
+        (guide.scoreIndex > previous.scoreIndex &&
+          guide.perfIndex > previous.perfIndex)
+      ) {
+        guides.push(guide);
+      }
+      return guides;
+    }, []);
+
+  if (monotonicGuides.length === 0) {
+    return runDP3D1NNRapico(scoreNotes, perfNotes);
+  }
+
+  const result: AlignmentTuple[] = [];
+  let previousScoreIndex = -1;
+  let previousPerfIndex = -1;
+
+  [...monotonicGuides, null].forEach((guide) => {
+    const nextScoreIndex = guide?.scoreIndex ?? sortedScore.length;
+    const nextPerfIndex = guide?.perfIndex ?? sortedPerf.length;
+    const scoreChunk = sortedScore.slice(previousScoreIndex + 1, nextScoreIndex);
+    const perfChunk = sortedPerf.slice(previousPerfIndex + 1, nextPerfIndex);
+
+    result.push(...runDP3D1NNRapico(scoreChunk, perfChunk));
+
+    if (guide) {
+      result.push({
+        scoreId: guide.pair.scoreId,
+        annotId: -1,
+        perfId: guide.pair.perfId,
+      });
+      previousScoreIndex = guide.scoreIndex;
+      previousPerfIndex = guide.perfIndex;
+    }
+  });
+
+  return sortPairs(result);
 };

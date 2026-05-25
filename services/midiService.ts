@@ -1,6 +1,62 @@
 
 import { Midi } from '@tonejs/midi';
-import { MidiData, MidiNote, AlignmentTuple } from '../types';
+import { MidiData, MidiGridLine, MidiNote, AlignmentTuple } from '../types';
+
+const DEFAULT_TIME_SIGNATURE: [number, number] = [4, 4];
+
+const buildGridLines = (midi: Midi): MidiGridLine[] => {
+  const durationTicks = midi.durationTicks;
+  const ppq = midi.header.ppq;
+  if (durationTicks <= 0 || ppq <= 0) return [];
+
+  const timeSignatures = [...midi.header.timeSignatures]
+    .map((event) => ({
+      ticks: Math.max(0, Math.round(event.ticks)),
+      timeSignature: event.timeSignature as [number, number],
+    }))
+    .sort((a, b) => a.ticks - b.ticks);
+
+  if (timeSignatures.length === 0 || timeSignatures[0].ticks > 0) {
+    timeSignatures.unshift({
+      ticks: 0,
+      timeSignature: DEFAULT_TIME_SIGNATURE,
+    });
+  }
+
+  const gridLines: MidiGridLine[] = [];
+  const seenTicks = new Set<number>();
+
+  timeSignatures.forEach((event, index) => {
+    if (event.ticks > durationTicks) return;
+
+    const nextEvent = timeSignatures[index + 1];
+    const segmentEndTicks = Math.min(nextEvent?.ticks ?? durationTicks, durationTicks);
+    const includeSegmentEnd = !nextEvent || segmentEndTicks >= durationTicks;
+    const [numerator, denominator] = event.timeSignature;
+    const ticksPerBeat = Math.max(1, Math.round(ppq * (4 / denominator)));
+    const ticksPerBar = Math.max(ticksPerBeat, ticksPerBeat * numerator);
+
+    for (
+      let tick = event.ticks;
+      includeSegmentEnd ? tick <= segmentEndTicks : tick < segmentEndTicks;
+      tick += ticksPerBeat
+    ) {
+      const roundedTick = Math.round(tick);
+      if (seenTicks.has(roundedTick)) continue;
+      seenTicks.add(roundedTick);
+
+      const ticksFromSegmentStart = roundedTick - event.ticks;
+      gridLines.push({
+        time: midi.header.ticksToSeconds(roundedTick),
+        ticks: roundedTick,
+        kind:
+          Math.abs(ticksFromSegmentStart % ticksPerBar) < 1 ? 'bar' : 'beat',
+      });
+    }
+  });
+
+  return gridLines.sort((a, b) => a.time - b.time);
+};
 
 /**
  * Core logic to parse MIDI data from an ArrayBuffer
@@ -24,14 +80,17 @@ export function parseMidiBuffer(arrayBuffer: ArrayBuffer): MidiData | null {
           pitch: note.midi,
           start: note.time,
           duration: note.duration,
+          ticks: note.ticks,
+          durationTicks: note.durationTicks,
           velocity: note.velocity
         });
       });
     });
 
-    // Deterministic sorting for ID assignment
+    // Deterministic sorting for ID assignment. Use ticks first so IDs match
+    // MIDI-order alignment files even when tempo maps produce dense time values.
     allNotes.sort((a, b) => {
-      if (Math.abs(a.start - b.start) > 0.0001) return a.start - b.start;
+      if (a.ticks !== b.ticks) return a.ticks - b.ticks;
       return a.pitch - b.pitch;
     });
 
@@ -43,7 +102,10 @@ export function parseMidiBuffer(arrayBuffer: ArrayBuffer): MidiData | null {
 
     return {
       notes: notesWithIds,
-      duration: midi.duration
+      duration: midi.duration,
+      durationTicks: midi.durationTicks,
+      ppq: midi.header.ppq,
+      gridLines: buildGridLines(midi)
     };
   } catch (err) {
     console.error('Error parsing MIDI buffer:', err);

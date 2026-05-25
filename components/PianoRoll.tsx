@@ -106,25 +106,42 @@ const PianoRoll: React.FC<PianoRollProps> = ({
       }
     }
 
-    // Vertical grid (beats and bars, assuming quarter-note beat timing).
-    const beatStep = 0.25;
-    const startTime = Math.floor(scrollX / beatStep) * beatStep;
     const endTime = scrollX + width / zoomX;
-    for (let t = startTime; t <= endTime + beatStep; t += beatStep) {
-      const x = (t - scrollX) * zoomX;
-      const beatIndex = Math.round(t / beatStep);
-      const isBar = beatIndex % 16 === 0;
-      const isBeat = beatIndex % 4 === 0;
-      ctx.strokeStyle = isBar
-        ? "rgba(255,255,255,0.34)"
-        : isBeat
-        ? "rgba(255,255,255,0.16)"
-        : "rgba(255,255,255,0.055)";
-      ctx.lineWidth = isBar ? 1.35 : isBeat ? 0.9 : 0.5;
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, height);
-      ctx.stroke();
+    const visibleGridLines =
+      data?.gridLines.filter(
+        (line) => line.time >= scrollX - 0.01 && line.time <= endTime + 0.01,
+      ) ?? [];
+
+    if (visibleGridLines.length > 0) {
+      visibleGridLines.forEach((line) => {
+        const x = (line.time - scrollX) * zoomX;
+        ctx.strokeStyle =
+          line.kind === "bar"
+            ? "rgba(255,255,255,0.38)"
+            : "rgba(255,255,255,0.17)";
+        ctx.lineWidth = line.kind === "bar" ? 1.35 : 0.85;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, height);
+        ctx.stroke();
+      });
+    } else {
+      // Fallback for synthetic data without MIDI header timing.
+      const beatStep = 0.5;
+      const startTime = Math.floor(scrollX / beatStep) * beatStep;
+      for (let t = startTime; t <= endTime + beatStep; t += beatStep) {
+        const x = (t - scrollX) * zoomX;
+        const beatIndex = Math.round(t / beatStep);
+        const isBar = beatIndex % 4 === 0;
+        ctx.strokeStyle = isBar
+          ? "rgba(255,255,255,0.34)"
+          : "rgba(255,255,255,0.14)";
+        ctx.lineWidth = isBar ? 1.35 : 0.75;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, height);
+        ctx.stroke();
+      }
     }
 
     // Static Anchor Line (Apparent white line)

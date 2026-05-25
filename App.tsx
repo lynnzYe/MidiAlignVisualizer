@@ -50,33 +50,74 @@ import {
   startMidiPlayback,
   stopMidiPlayback,
 } from "./services/audioService";
-import { runDP3D1NNRapico } from "./services/rapicoDtw";
+import { runMelodyGuidedAlignment } from "./services/melodyGuidedAlignment";
 // TODO: check alignment seems to be of wrong order. Id assignment
-const PLAYHEAD_ANCHOR_RATIO = 1 / 5;
+const PLAYHEAD_ANCHOR_RATIO = 1 / 3;
 
 const emptyMarks = (): AlignmentMarksByPanel => ({
   score: { left: null, right: null },
   perf: { left: null, right: null },
 });
 
+const initialRollViewState = (anchorX = 0): ViewState => ({
+  zoomX: 100,
+  zoomY: 15,
+  scrollX: -anchorX / 100,
+  scrollY: 60,
+});
+
+type AlignmentEditSnapshot = {
+  alignment: AlignmentTuple[];
+  manualAnchorKeys: string[];
+};
+
+const pairKey = (scoreId: number, perfId: number) => `${scoreId}:${perfId}`;
+
+const pairKeyParts = (key: string) => {
+  const [scoreId, perfId] = key.split(":").map(Number);
+  return { scoreId, perfId };
+};
+
+const getUnmappedNoteIds = (
+  midi: MidiData | null,
+  alignment: AlignmentTuple[],
+  panel: RollPanel,
+  active: boolean,
+) => {
+  if (!midi || !active) return new Set<number>();
+
+  const matched = new Set<number>();
+  alignment.forEach((pair) => {
+    if (panel === "score") {
+      if (pair.scoreId !== -1 && pair.perfId !== -1) matched.add(pair.scoreId);
+    } else if (pair.perfId !== -1 && pair.scoreId !== -1) {
+      matched.add(pair.perfId);
+    }
+  });
+
+  const maxNoteId = midi.notes.reduce(
+    (maxId, note) => Math.max(maxId, note.id),
+    -1,
+  );
+  const noteIds = new Set(midi.notes.map((note) => note.id));
+  const unmapped = new Set<number>();
+  for (let id = 0; id <= maxNoteId; id += 1) {
+    if (noteIds.has(id) && !matched.has(id)) unmapped.add(id);
+  }
+  return unmapped;
+};
+
 const App: React.FC = () => {
   const [scoreMidi, setScoreMidi] = useState<MidiData | null>(null);
   const [perfMidi, setPerfMidi] = useState<MidiData | null>(null);
   const [alignment, setAlignment] = useState<AlignmentTuple[]>([]);
   const [gtAlignment, setGtAlignment] = useState<AlignmentTuple[]>([]);
+  const [unmappedHighlightActive, setUnmappedHighlightActive] = useState(false);
 
-  const [scoreViewState, setScoreViewState] = useState<ViewState>({
-    zoomX: 100,
-    zoomY: 15,
-    scrollX: 0,
-    scrollY: 60,
-  });
-  const [perfViewState, setPerfViewState] = useState<ViewState>({
-    zoomX: 100,
-    zoomY: 15,
-    scrollX: 0,
-    scrollY: 60,
-  });
+  const [scoreViewState, setScoreViewState] =
+    useState<ViewState>(initialRollViewState);
+  const [perfViewState, setPerfViewState] =
+    useState<ViewState>(initialRollViewState);
   const [playback, setPlayback] = useState<PlaybackState>({
     isPlaying: false,
     startTime: 0,
@@ -122,8 +163,15 @@ const App: React.FC = () => {
   const [alignmentMarks, setAlignmentMarks] =
     useState<AlignmentMarksByPanel>(emptyMarks);
   const [activeEditPanel, setActiveEditPanel] = useState<RollPanel>("score");
-  const [manualUndoStack, setManualUndoStack] = useState<AlignmentTuple[][]>([]);
-  const [manualRedoStack, setManualRedoStack] = useState<AlignmentTuple[][]>([]);
+  const [manualAnchorKeys, setManualAnchorKeys] = useState<Set<string>>(
+    new Set(),
+  );
+  const [manualUndoStack, setManualUndoStack] = useState<
+    AlignmentEditSnapshot[]
+  >([]);
+  const [manualRedoStack, setManualRedoStack] = useState<
+    AlignmentEditSnapshot[]
+  >([]);
   const [dragLink, setDragLink] = useState<{
     fromPanel: RollPanel;
     note: MidiNote;
@@ -160,43 +208,32 @@ const App: React.FC = () => {
 
       if (sMidi) setScoreMidi(sMidi);
       if (pMidi) setPerfMidi(pMidi);
-      if (align.length > 0) setAlignment(align);
+      if (align.length > 0) {
+        setAlignment(align);
+        setUnmappedHighlightActive(true);
+      }
       if (gtalign.length > 0) setGtAlignment(gtalign);
     };
     loadDefaults();
   }, []);
 
   // Unmapped detection logic
-  const scoreUnmappedIds = useMemo(() => {
-    if (!scoreMidi || alignment.length === 0) return new Set<number>();
-    const mapped = new Set<number>();
-    const explicitlyUnmapped = new Set<number>();
-    alignment.forEach((p) => {
-      if (p.scoreId !== -1 && p.perfId !== -1) mapped.add(p.scoreId);
-      if (p.scoreId !== -1 && p.perfId === -1)
-        explicitlyUnmapped.add(p.scoreId);
-    });
-    const result = new Set<number>(explicitlyUnmapped);
-    scoreMidi.notes.forEach((n) => {
-      if (!mapped.has(n.id)) result.add(n.id);
-    });
-    return result;
-  }, [scoreMidi, alignment]);
+  const scoreUnmappedIds = useMemo(
+    () =>
+      getUnmappedNoteIds(
+        scoreMidi,
+        alignment,
+        "score",
+        unmappedHighlightActive,
+      ),
+    [scoreMidi, alignment, unmappedHighlightActive],
+  );
 
-  const perfUnmappedIds = useMemo(() => {
-    if (!perfMidi || alignment.length === 0) return new Set<number>();
-    const mapped = new Set<number>();
-    const explicitlyUnmapped = new Set<number>();
-    alignment.forEach((p) => {
-      if (p.perfId !== -1 && p.scoreId !== -1) mapped.add(p.perfId);
-      if (p.perfId !== -1 && p.scoreId === -1) explicitlyUnmapped.add(p.perfId);
-    });
-    const result = new Set<number>(explicitlyUnmapped);
-    perfMidi.notes.forEach((n) => {
-      if (!mapped.has(n.id)) result.add(n.id);
-    });
-    return result;
-  }, [perfMidi, alignment]);
+  const perfUnmappedIds = useMemo(
+    () =>
+      getUnmappedNoteIds(perfMidi, alignment, "perf", unmappedHighlightActive),
+    [perfMidi, alignment, unmappedHighlightActive],
+  );
 
   const anchorX = Math.max(1, containerSize.width * PLAYHEAD_ANCHOR_RATIO);
 
@@ -300,19 +337,27 @@ const App: React.FC = () => {
 
   const undoManualAlignment = useCallback(() => {
     if (manualUndoStack.length === 0) return;
-    const previousAlignment = manualUndoStack[manualUndoStack.length - 1];
+    const previous = manualUndoStack[manualUndoStack.length - 1];
     setManualUndoStack((undoStack) => undoStack.slice(0, -1));
-    setManualRedoStack((redoStack) => [...redoStack, alignment]);
-    setAlignment(previousAlignment);
-  }, [alignment, manualUndoStack]);
+    setManualRedoStack((redoStack) => [
+      ...redoStack,
+      { alignment, manualAnchorKeys: Array.from(manualAnchorKeys) },
+    ]);
+    setManualAnchorKeys(new Set(previous.manualAnchorKeys));
+    setAlignment(previous.alignment);
+  }, [alignment, manualAnchorKeys, manualUndoStack]);
 
   const redoManualAlignment = useCallback(() => {
     if (manualRedoStack.length === 0) return;
-    const nextAlignment = manualRedoStack[manualRedoStack.length - 1];
+    const next = manualRedoStack[manualRedoStack.length - 1];
     setManualRedoStack((redoStack) => redoStack.slice(0, -1));
-    setManualUndoStack((undoStack) => [...undoStack, alignment]);
-    setAlignment(nextAlignment);
-  }, [alignment, manualRedoStack]);
+    setManualUndoStack((undoStack) => [
+      ...undoStack,
+      { alignment, manualAnchorKeys: Array.from(manualAnchorKeys) },
+    ]);
+    setManualAnchorKeys(new Set(next.manualAnchorKeys));
+    setAlignment(next.alignment);
+  }, [alignment, manualAnchorKeys, manualRedoStack]);
 
   // Hotkeys
   useEffect(() => {
@@ -322,8 +367,7 @@ const App: React.FC = () => {
         e.target instanceof HTMLTextAreaElement;
       if (isInput) return;
 
-      const isUndoKey =
-        (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z";
+      const isUndoKey = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z";
       if (isUndoKey) {
         e.preventDefault();
         if (e.shiftKey) {
@@ -378,8 +422,8 @@ const App: React.FC = () => {
         }
       }
     };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, [
     togglePlayback,
     markAlignmentBoundary,
@@ -528,13 +572,28 @@ const App: React.FC = () => {
     if (!file) return;
     const data = await parseMidiFile(file);
     if (data) {
+      const resetView = initialRollViewState(anchorX);
+      stopMidiPlayback();
       setScoreMidi(data);
+      scoreViewStateRef.current = resetView;
+      setScoreViewState(resetView);
       setAlignment([]); // Clear alignment as IDs will be completely different
+      setUnmappedHighlightActive(false);
       setGtAlignment([]); // Clear alignment as IDs will be completely different
       setSelectedNote(null);
       setAlignmentMarks(emptyMarks());
+      setManualAnchorKeys(new Set());
       setManualUndoStack([]);
       setManualRedoStack([]);
+      setPlayback({
+        isPlaying: false,
+        startTime: 0,
+        startOffset: 0,
+        activePanel: "score",
+      });
+      setPlayheadTime(0);
+      if (alignInputRef.current) alignInputRef.current.value = "";
+      if (gtInputRef.current) gtInputRef.current.value = "";
     } else alert("Error: Invalid MIDI file.");
     e.target.value = "";
   };
@@ -544,24 +603,46 @@ const App: React.FC = () => {
     if (!file) return;
     const data = await parseMidiFile(file);
     if (data) {
+      const resetView = initialRollViewState(anchorX);
+      stopMidiPlayback();
       setPerfMidi(data);
+      perfViewStateRef.current = resetView;
+      setPerfViewState(resetView);
       setAlignment([]); // Clear alignment as IDs will be completely different
+      setUnmappedHighlightActive(false);
       setGtAlignment([]); // Clear alignment as IDs will be completely different
       setSelectedNote(null);
       setAlignmentMarks(emptyMarks());
+      setManualAnchorKeys(new Set());
       setManualUndoStack([]);
       setManualRedoStack([]);
+      setPlayback({
+        isPlaying: false,
+        startTime: 0,
+        startOffset: 0,
+        activePanel: "perf",
+      });
+      setPlayheadTime(0);
+      if (alignInputRef.current) alignInputRef.current.value = "";
+      if (gtInputRef.current) gtInputRef.current.value = "";
     } else alert("Error: Invalid MIDI file.");
     e.target.value = "";
   };
 
   const clearAll = () => {
+    const resetView = initialRollViewState(anchorX);
     setScoreMidi(null);
     setPerfMidi(null);
+    scoreViewStateRef.current = resetView;
+    perfViewStateRef.current = resetView;
+    setScoreViewState(resetView);
+    setPerfViewState(resetView);
     setAlignment([]);
+    setUnmappedHighlightActive(false);
     setGtAlignment([]);
     setSelectedNote(null);
     setAlignmentMarks(emptyMarks());
+    setManualAnchorKeys(new Set());
     setManualUndoStack([]);
     setManualRedoStack([]);
     setDragLink(null);
@@ -734,7 +815,7 @@ const App: React.FC = () => {
     return midi.notes
       .filter(
         (note) =>
-          note.start + note.duration >= marks.left && note.start <= marks.right,
+          note.start >= marks.left && note.start <= marks.right,
       )
       .sort((a, b) => {
         if (Math.abs(a.start - b.start) > 0.0001) return a.start - b.start;
@@ -742,23 +823,61 @@ const App: React.FC = () => {
       });
   };
 
-  const canRunSegmentAlignment =
+  const hasMelodyGuideInMarkedRange = (() => {
+    if (!scoreMidi || !perfMidi) return false;
+    const scoreIds = new Set(
+      getNotesInMarkedRange(scoreMidi, "score").map((note) => note.id),
+    );
+    const perfIds = new Set(
+      getNotesInMarkedRange(perfMidi, "perf").map((note) => note.id),
+    );
+    return alignment.some(
+      (pair) =>
+        pair.scoreId !== -1 &&
+        pair.perfId !== -1 &&
+        scoreIds.has(pair.scoreId) &&
+        perfIds.has(pair.perfId) &&
+        manualAnchorKeys.has(pairKey(pair.scoreId, pair.perfId)),
+    );
+  })();
+
+  const canRunMelodyAlignment =
     getCompletedMarks("score") !== null &&
     getCompletedMarks("perf") !== null &&
     !!scoreMidi &&
-    !!perfMidi;
+    !!perfMidi &&
+    hasMelodyGuideInMarkedRange;
 
-  const runSegmentAlignment = () => {
+  const runMelodyGuidedSegmentAlignment = () => {
     if (!scoreMidi || !perfMidi) return;
 
     const scoreNotes = getNotesInMarkedRange(scoreMidi, "score");
     const perfNotes = getNotesInMarkedRange(perfMidi, "perf");
-    if (scoreNotes.length === 0 && perfNotes.length === 0) return;
+    if (scoreNotes.length === 0 || perfNotes.length === 0) return;
 
     const scoreIds = new Set(scoreNotes.map((note) => note.id));
     const perfIds = new Set(perfNotes.map((note) => note.id));
-    const nextPairs = runDP3D1NNRapico(scoreNotes, perfNotes);
+    const guidePairs = alignment.filter(
+      (pair) =>
+        pair.scoreId !== -1 &&
+        pair.perfId !== -1 &&
+        scoreIds.has(pair.scoreId) &&
+        perfIds.has(pair.perfId) &&
+        manualAnchorKeys.has(pairKey(pair.scoreId, pair.perfId)),
+    );
+    if (guidePairs.length === 0) return;
 
+    const nextPairs = runMelodyGuidedAlignment(
+      scoreNotes,
+      perfNotes,
+      guidePairs,
+    ).filter((pair) => scoreIds.has(pair.scoreId) && perfIds.has(pair.perfId));
+
+    setManualUndoStack((undoStack) => [
+      ...undoStack,
+      { alignment, manualAnchorKeys: Array.from(manualAnchorKeys) },
+    ]);
+    setManualRedoStack([]);
     setAlignment((prev) =>
       sortedAlignment([
         ...prev.filter(
@@ -769,8 +888,16 @@ const App: React.FC = () => {
         ...nextPairs,
       ]),
     );
-    setManualUndoStack([]);
-    setManualRedoStack([]);
+    setManualAnchorKeys((prev) => {
+      const next = new Set<string>();
+      prev.forEach((key) => {
+        const { scoreId, perfId } = pairKeyParts(key);
+        if (!scoreIds.has(scoreId) && !perfIds.has(perfId)) next.add(key);
+      });
+      guidePairs.forEach((pair) => next.add(pairKey(pair.scoreId, pair.perfId)));
+      return next;
+    });
+    setUnmappedHighlightActive(true);
   };
 
   const commitManualAlignment = (
@@ -783,17 +910,29 @@ const App: React.FC = () => {
         ? { scoreId: fromNote.id, annotId: -1, perfId: targetNote.id }
         : { scoreId: targetNote.id, annotId: -1, perfId: fromNote.id };
 
-    setAlignment((prev) => {
-      setManualUndoStack((undoStack) => [...undoStack, prev]);
-      setManualRedoStack([]);
-      return sortedAlignment([
-        ...prev.filter(
+    setManualUndoStack((undoStack) => [
+      ...undoStack,
+      { alignment, manualAnchorKeys: Array.from(manualAnchorKeys) },
+    ]);
+    setManualRedoStack([]);
+    setAlignment(
+      sortedAlignment([
+        ...alignment.filter(
           (existing) =>
             existing.scoreId !== pair.scoreId &&
             existing.perfId !== pair.perfId,
         ),
         pair,
-      ]);
+      ]),
+    );
+    setManualAnchorKeys((prev) => {
+      const next = new Set<string>();
+      prev.forEach((key) => {
+        const { scoreId, perfId } = pairKeyParts(key);
+        if (scoreId !== pair.scoreId && perfId !== pair.perfId) next.add(key);
+      });
+      next.add(pairKey(pair.scoreId, pair.perfId));
+      return next;
     });
   };
 
@@ -995,10 +1134,14 @@ const App: React.FC = () => {
                 type="file"
                 onChange={async (e) => {
                   if (e.target.files?.[0]) {
+                    stopMidiPlayback();
                     const data = await parseAlignmentCsv(e.target.files[0]);
                     setAlignment(data);
+                    setUnmappedHighlightActive(data.length > 0);
+                    setManualAnchorKeys(new Set());
                     setManualUndoStack([]);
                     setManualRedoStack([]);
+                    setPlayback((prev) => ({ ...prev, isPlaying: false }));
                   }
                   e.target.value = "";
                 }}
@@ -1037,16 +1180,16 @@ const App: React.FC = () => {
 
           <div className="flex items-center gap-2 bg-[#1c1c1f] p-1.5 rounded-xl border border-white/[0.04] shadow-inner">
             <button
-              onClick={runSegmentAlignment}
-              disabled={!canRunSegmentAlignment}
+              onClick={runMelodyGuidedSegmentAlignment}
+              disabled={!canRunMelodyAlignment}
               className={`btn-modern group ${
-                canRunSegmentAlignment
+                canRunMelodyAlignment
                   ? "!border-red-500/25 hover:!border-red-500/50 hover:bg-red-500/5"
                   : "opacity-40 cursor-not-allowed"
               }`}
             >
               <Wand2 className="w-4 h-4 text-red-400/70 group-hover:text-red-300 transition-colors" />
-              <span>DTW Segment</span>
+              <span>Melody Align</span>
             </button>
             <button
               onClick={exportAlignment}

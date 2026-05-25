@@ -4,12 +4,23 @@ export interface MidiNote {
   pitch: number;
   start: number;
   duration: number;
+  ticks: number;
+  durationTicks: number;
   velocity: number;
+}
+
+export interface MidiGridLine {
+  time: number;
+  ticks: number;
+  kind: 'bar' | 'beat';
 }
 
 export interface MidiData {
   notes: MidiNote[];
   duration: number;
+  durationTicks: number;
+  ppq: number;
+  gridLines: MidiGridLine[];
 }
 
 export interface AlignmentTuple {
