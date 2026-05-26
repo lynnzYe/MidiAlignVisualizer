@@ -4,12 +4,23 @@ export interface MidiNote {
   pitch: number;
   start: number;
   duration: number;
+  ticks: number;
+  durationTicks: number;
   velocity: number;
+}
+
+export interface MidiGridLine {
+  time: number;
+  ticks: number;
+  kind: 'bar' | 'beat';
 }
 
 export interface MidiData {
   notes: MidiNote[];
   duration: number;
+  durationTicks: number;
+  ppq: number;
+  gridLines: MidiGridLine[];
 }
 
 export interface AlignmentTuple {
@@ -33,3 +44,14 @@ export interface PlaybackState {
   startOffset: number; // time in seconds where started
   activePanel: 'score' | 'perf' | null;
 }
+
+export type RollPanel = 'score' | 'perf';
+
+export type PlaybackSoundMode = 'native' | 'aligned-score';
+
+export interface AlignmentRangeMarks {
+  left: number | null;
+  right: number | null;
+}
+
+export type AlignmentMarksByPanel = Record<RollPanel, AlignmentRangeMarks>;

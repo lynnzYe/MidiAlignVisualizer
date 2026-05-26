@@ -12,6 +12,9 @@ import {
   AlignmentVisibility,
   MidiNote,
   PlaybackState,
+  AlignmentMarksByPanel,
+  RollPanel,
+  PlaybackSoundMode,
 } from "./types";
 import {
   parseMidiFile,
@@ -38,28 +41,83 @@ import {
   ChevronRight,
   ChevronLeft,
   AlertCircle,
+  Download,
+  Wand2,
+  GitCompareArrows,
 } from "lucide-react";
+import {
+  playMidiNotePreview,
+  startMidiPlayback,
+  stopMidiPlayback,
+} from "./services/audioService";
+import { runMelodyGuidedAlignment } from "./services/melodyGuidedAlignment";
 // TODO: check alignment seems to be of wrong order. Id assignment
-const PLAYHEAD_ANCHOR_X = 100; // Pixels from left edge where playback starts
+const PLAYHEAD_ANCHOR_RATIO = 1 / 3;
+
+const emptyMarks = (): AlignmentMarksByPanel => ({
+  score: { left: null, right: null },
+  perf: { left: null, right: null },
+});
+
+const initialRollViewState = (anchorX = 0): ViewState => ({
+  zoomX: 100,
+  zoomY: 15,
+  scrollX: -anchorX / 100,
+  scrollY: 60,
+});
+
+type AlignmentEditSnapshot = {
+  alignment: AlignmentTuple[];
+  manualAnchorKeys: string[];
+};
+
+const pairKey = (scoreId: number, perfId: number) => `${scoreId}:${perfId}`;
+
+const pairKeyParts = (key: string) => {
+  const [scoreId, perfId] = key.split(":").map(Number);
+  return { scoreId, perfId };
+};
+
+const getUnmappedNoteIds = (
+  midi: MidiData | null,
+  alignment: AlignmentTuple[],
+  panel: RollPanel,
+  active: boolean,
+) => {
+  if (!midi || !active) return new Set<number>();
+
+  const matched = new Set<number>();
+  alignment.forEach((pair) => {
+    if (panel === "score") {
+      if (pair.scoreId !== -1 && pair.perfId !== -1) matched.add(pair.scoreId);
+    } else if (pair.perfId !== -1 && pair.scoreId !== -1) {
+      matched.add(pair.perfId);
+    }
+  });
+
+  const maxNoteId = midi.notes.reduce(
+    (maxId, note) => Math.max(maxId, note.id),
+    -1,
+  );
+  const noteIds = new Set(midi.notes.map((note) => note.id));
+  const unmapped = new Set<number>();
+  for (let id = 0; id <= maxNoteId; id += 1) {
+    if (noteIds.has(id) && !matched.has(id)) unmapped.add(id);
+  }
+  return unmapped;
+};
 
 const App: React.FC = () => {
   const [scoreMidi, setScoreMidi] = useState<MidiData | null>(null);
   const [perfMidi, setPerfMidi] = useState<MidiData | null>(null);
   const [alignment, setAlignment] = useState<AlignmentTuple[]>([]);
   const [gtAlignment, setGtAlignment] = useState<AlignmentTuple[]>([]);
+  const [unmappedHighlightActive, setUnmappedHighlightActive] = useState(false);
 
-  const [scoreViewState, setScoreViewState] = useState<ViewState>({
-    zoomX: 100,
-    zoomY: 15,
-    scrollX: 0,
-    scrollY: 60,
-  });
-  const [perfViewState, setPerfViewState] = useState<ViewState>({
-    zoomX: 100,
-    zoomY: 15,
-    scrollX: 0,
-    scrollY: 60,
-  });
+  const [scoreViewState, setScoreViewState] =
+    useState<ViewState>(initialRollViewState);
+  const [perfViewState, setPerfViewState] =
+    useState<ViewState>(initialRollViewState);
   const [playback, setPlayback] = useState<PlaybackState>({
     isPlaying: false,
     startTime: 0,
@@ -86,16 +144,54 @@ const App: React.FC = () => {
   } | null>(null);
   const [visibility, setVisibility] = useState<AlignmentVisibility>("full");
   const [syncScroll, setSyncScroll] = useState(false);
+  const [playbackSoundMode, setPlaybackSoundMode] =
+    useState<PlaybackSoundMode>("native");
 
   const [playheadTime, setPlayheadTime] = useState(0);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const scorePanelRef = useRef<HTMLDivElement>(null);
+  const perfPanelRef = useRef<HTMLDivElement>(null);
   const requestRef = useRef<number>(null);
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
 
   const scoreInputRef = useRef<HTMLInputElement>(null);
   const perfInputRef = useRef<HTMLInputElement>(null);
   const alignInputRef = useRef<HTMLInputElement>(null);
   const gtInputRef = useRef<HTMLInputElement>(null);
+
+  const [alignmentMarks, setAlignmentMarks] =
+    useState<AlignmentMarksByPanel>(emptyMarks);
+  const [activeEditPanel, setActiveEditPanel] = useState<RollPanel>("score");
+  const [manualAnchorKeys, setManualAnchorKeys] = useState<Set<string>>(
+    new Set(),
+  );
+  const [manualUndoStack, setManualUndoStack] = useState<
+    AlignmentEditSnapshot[]
+  >([]);
+  const [manualRedoStack, setManualRedoStack] = useState<
+    AlignmentEditSnapshot[]
+  >([]);
+  const [dragLink, setDragLink] = useState<{
+    fromPanel: RollPanel;
+    note: MidiNote;
+    pointerX: number;
+    pointerY: number;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const resizeObserver = new ResizeObserver(([entry]) => {
+      setContainerSize({
+        width: entry.contentRect.width,
+        height: entry.contentRect.height,
+      });
+    });
+
+    resizeObserver.observe(containerRef.current);
+    return () => resizeObserver.disconnect();
+  }, []);
 
   // Load defaults on mount
   useEffect(() => {
@@ -112,64 +208,157 @@ const App: React.FC = () => {
 
       if (sMidi) setScoreMidi(sMidi);
       if (pMidi) setPerfMidi(pMidi);
-      if (align.length > 0) setAlignment(align);
+      if (align.length > 0) {
+        setAlignment(align);
+        setUnmappedHighlightActive(true);
+      }
       if (gtalign.length > 0) setGtAlignment(gtalign);
     };
     loadDefaults();
   }, []);
 
   // Unmapped detection logic
-  const scoreUnmappedIds = useMemo(() => {
-    if (!scoreMidi || alignment.length === 0) return new Set<number>();
-    const mapped = new Set<number>();
-    const explicitlyUnmapped = new Set<number>();
-    alignment.forEach((p) => {
-      if (p.scoreId !== -1 && p.perfId !== -1) mapped.add(p.scoreId);
-      if (p.scoreId !== -1 && p.perfId === -1)
-        explicitlyUnmapped.add(p.scoreId);
-    });
-    const result = new Set<number>(explicitlyUnmapped);
-    scoreMidi.notes.forEach((n) => {
-      if (!mapped.has(n.id)) result.add(n.id);
-    });
-    return result;
-  }, [scoreMidi, alignment]);
+  const scoreUnmappedIds = useMemo(
+    () =>
+      getUnmappedNoteIds(
+        scoreMidi,
+        alignment,
+        "score",
+        unmappedHighlightActive,
+      ),
+    [scoreMidi, alignment, unmappedHighlightActive],
+  );
 
-  const perfUnmappedIds = useMemo(() => {
-    if (!perfMidi || alignment.length === 0) return new Set<number>();
-    const mapped = new Set<number>();
-    const explicitlyUnmapped = new Set<number>();
-    alignment.forEach((p) => {
-      if (p.perfId !== -1 && p.scoreId !== -1) mapped.add(p.perfId);
-      if (p.perfId !== -1 && p.scoreId === -1) explicitlyUnmapped.add(p.perfId);
-    });
-    const result = new Set<number>(explicitlyUnmapped);
-    perfMidi.notes.forEach((n) => {
-      if (!mapped.has(n.id)) result.add(n.id);
-    });
-    return result;
-  }, [perfMidi, alignment]);
+  const perfUnmappedIds = useMemo(
+    () =>
+      getUnmappedNoteIds(perfMidi, alignment, "perf", unmappedHighlightActive),
+    [perfMidi, alignment, unmappedHighlightActive],
+  );
 
-  const togglePlayback = useCallback((panel: "score" | "perf") => {
-    const currentPlayback = playbackRef.current;
-    if (currentPlayback.isPlaying && currentPlayback.activePanel === panel) {
-      setPlayback((prev) => ({ ...prev, isPlaying: false }));
-    } else {
+  const anchorX = Math.max(1, containerSize.width * PLAYHEAD_ANCHOR_RATIO);
+
+  const scoreNoteById = useMemo(() => {
+    return new Map(scoreMidi?.notes.map((note) => [note.id, note]) ?? []);
+  }, [scoreMidi]);
+
+  const alignedScoreByPerfId = useMemo(() => {
+    const map = new Map<number, MidiNote>();
+    alignment.forEach((pair) => {
+      if (pair.scoreId === -1 || pair.perfId === -1) return;
+      const scoreNote = scoreNoteById.get(pair.scoreId);
+      if (scoreNote) map.set(pair.perfId, scoreNote);
+    });
+    return map;
+  }, [alignment, scoreNoteById]);
+
+  const getPlaybackNotes = useCallback(
+    (panel: RollPanel) => {
+      if (panel === "score") return scoreMidi?.notes ?? [];
+      if (!perfMidi) return [];
+      if (playbackSoundMode === "native") return perfMidi.notes;
+
+      return perfMidi.notes.flatMap((perfNote) => {
+        const scoreNote = alignedScoreByPerfId.get(perfNote.id);
+        if (!scoreNote) return [];
+        return [{ ...perfNote, pitch: scoreNote.pitch }];
+      });
+    },
+    [alignedScoreByPerfId, perfMidi, playbackSoundMode, scoreMidi],
+  );
+
+  const getPreviewNote = useCallback(
+    (note: MidiNote, panel: RollPanel) => {
+      if (panel !== "perf" || playbackSoundMode === "native") return note;
+      const scoreNote = alignedScoreByPerfId.get(note.id);
+      return scoreNote ? { ...note, pitch: scoreNote.pitch } : null;
+    },
+    [alignedScoreByPerfId, playbackSoundMode],
+  );
+
+  const focusPanel = useCallback((panel: RollPanel) => {
+    setActiveEditPanel(panel);
+    setPlayback((prev) =>
+      prev.isPlaying ? prev : { ...prev, activePanel: panel },
+    );
+  }, []);
+
+  const togglePlayback = useCallback(
+    (panel: RollPanel) => {
+      const currentPlayback = playbackRef.current;
+      if (currentPlayback.isPlaying && currentPlayback.activePanel === panel) {
+        setPlayback((prev) => ({ ...prev, isPlaying: false }));
+        stopMidiPlayback();
+      } else {
+        const view =
+          panel === "score"
+            ? scoreViewStateRef.current
+            : perfViewStateRef.current;
+        // When pressing play, red line jumps to where the dotted white line is at
+        const startTimeAtAnchor = view.scrollX + anchorX / view.zoomX;
+        setPlayback({
+          isPlaying: true,
+          startTime: performance.now(),
+          startOffset: startTimeAtAnchor,
+          activePanel: panel,
+        });
+        setPlayheadTime(startTimeAtAnchor);
+        const notes = getPlaybackNotes(panel);
+        if (notes.length > 0) {
+          void startMidiPlayback(notes, startTimeAtAnchor);
+        }
+      }
+    },
+    [anchorX, getPlaybackNotes],
+  );
+
+  const markAlignmentBoundary = useCallback(
+    (panel: RollPanel) => {
       const view =
         panel === "score"
           ? scoreViewStateRef.current
           : perfViewStateRef.current;
-      // When pressing play, red line jumps to where the dotted white line is at
-      const startTimeAtAnchor = view.scrollX + PLAYHEAD_ANCHOR_X / view.zoomX;
-      setPlayback({
-        isPlaying: true,
-        startTime: performance.now(),
-        startOffset: startTimeAtAnchor,
-        activePanel: panel,
+      const markTime = view.scrollX + anchorX / view.zoomX;
+
+      setAlignmentMarks((prev) => {
+        const current = prev[panel];
+        const nextPanelMarks =
+          current.left === null || current.right !== null
+            ? { left: markTime, right: null }
+            : {
+                left: Math.min(current.left, markTime),
+                right: Math.max(current.left, markTime),
+              };
+
+        return { ...prev, [panel]: nextPanelMarks };
       });
-      setPlayheadTime(startTimeAtAnchor);
-    }
-  }, []);
+    },
+    [anchorX],
+  );
+
+  const undoManualAlignment = useCallback(() => {
+    if (manualUndoStack.length === 0) return;
+    const previous = manualUndoStack[manualUndoStack.length - 1];
+    setManualUndoStack((undoStack) => undoStack.slice(0, -1));
+    setManualRedoStack((redoStack) => [
+      ...redoStack,
+      { alignment, manualAnchorKeys: Array.from(manualAnchorKeys) },
+    ]);
+    setManualAnchorKeys(new Set(previous.manualAnchorKeys));
+    setAlignment(previous.alignment);
+  }, [alignment, manualAnchorKeys, manualUndoStack]);
+
+  const redoManualAlignment = useCallback(() => {
+    if (manualRedoStack.length === 0) return;
+    const next = manualRedoStack[manualRedoStack.length - 1];
+    setManualRedoStack((redoStack) => redoStack.slice(0, -1));
+    setManualUndoStack((undoStack) => [
+      ...undoStack,
+      { alignment, manualAnchorKeys: Array.from(manualAnchorKeys) },
+    ]);
+    setManualAnchorKeys(new Set(next.manualAnchorKeys));
+    setAlignment(next.alignment);
+  }, [alignment, manualAnchorKeys, manualRedoStack]);
+
   // Hotkeys
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -178,12 +367,34 @@ const App: React.FC = () => {
         e.target instanceof HTMLTextAreaElement;
       if (isInput) return;
 
+      const isUndoKey = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z";
+      if (isUndoKey) {
+        e.preventDefault();
+        if (e.shiftKey) {
+          redoManualAlignment();
+        } else {
+          undoManualAlignment();
+        }
+        return;
+      }
+
       if (e.key.toLowerCase() === "v") {
         setSyncScroll((prev) => !prev);
       }
       if (e.key === " ") {
         e.preventDefault();
-        togglePlayback(playbackRef.current.activePanel || "score");
+        togglePlayback(playbackRef.current.activePanel || activeEditPanel);
+      }
+      if (e.key.toLowerCase() === "m") {
+        e.preventDefault();
+        markAlignmentBoundary(activeEditPanel);
+      }
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        setAlignmentMarks((prev) => ({
+          ...prev,
+          [activeEditPanel]: { left: null, right: null },
+        }));
       }
 
       // MoveID: Keyboard navigation for selected note
@@ -211,9 +422,18 @@ const App: React.FC = () => {
         }
       }
     };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [togglePlayback, selectedNote, scoreMidi, perfMidi]);
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [
+    togglePlayback,
+    markAlignmentBoundary,
+    undoManualAlignment,
+    redoManualAlignment,
+    activeEditPanel,
+    selectedNote,
+    scoreMidi,
+    perfMidi,
+  ]);
 
   // Playback Loop
   useEffect(() => {
@@ -223,11 +443,19 @@ const App: React.FC = () => {
         const elapsed = (time - currentPlayback.startTime) / 1000;
         const currentPos = currentPlayback.startOffset + elapsed;
         setPlayheadTime(currentPos);
+        const activeMidi =
+          currentPlayback.activePanel === "score" ? scoreMidi : perfMidi;
+        if (activeMidi && currentPos > activeMidi.duration + 0.1) {
+          setPlayback((prev) => ({ ...prev, isPlaying: false }));
+          stopMidiPlayback();
+          requestRef.current = requestAnimationFrame(animate);
+          return;
+        }
 
         if (currentPlayback.activePanel === "score") {
           setScoreViewState((prev) => ({
             ...prev,
-            scrollX: currentPos - PLAYHEAD_ANCHOR_X / prev.zoomX,
+            scrollX: currentPos - anchorX / prev.zoomX,
           }));
           if (syncScroll) {
             const sNote = scoreMidi?.notes.find(
@@ -240,14 +468,14 @@ const App: React.FC = () => {
               if (pNote && pId !== -1)
                 setPerfViewState((prev) => ({
                   ...prev,
-                  scrollX: pNote.start - PLAYHEAD_ANCHOR_X / prev.zoomX,
+                  scrollX: pNote.start - anchorX / prev.zoomX,
                 }));
             }
           }
         } else if (currentPlayback.activePanel === "perf") {
           setPerfViewState((prev) => ({
             ...prev,
-            scrollX: currentPos - PLAYHEAD_ANCHOR_X / prev.zoomX,
+            scrollX: currentPos - anchorX / prev.zoomX,
           }));
           if (syncScroll) {
             const pNote = perfMidi?.notes.find(
@@ -260,7 +488,7 @@ const App: React.FC = () => {
               if (sNote && sId !== -1)
                 setScoreViewState((prev) => ({
                   ...prev,
-                  scrollX: sNote.start - PLAYHEAD_ANCHOR_X / prev.zoomX,
+                  scrollX: sNote.start - anchorX / prev.zoomX,
                 }));
             }
           }
@@ -270,7 +498,9 @@ const App: React.FC = () => {
     };
     requestRef.current = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(requestRef.current!);
-  }, [syncScroll, scoreMidi, perfMidi, alignment]);
+  }, [syncScroll, scoreMidi, perfMidi, alignment, anchorX]);
+
+  useEffect(() => () => stopMidiPlayback(), []);
 
   const handleScroll = useCallback(
     (panel: "score" | "perf", deltaX: number, deltaY: number) => {
@@ -342,10 +572,28 @@ const App: React.FC = () => {
     if (!file) return;
     const data = await parseMidiFile(file);
     if (data) {
+      const resetView = initialRollViewState(anchorX);
+      stopMidiPlayback();
       setScoreMidi(data);
+      scoreViewStateRef.current = resetView;
+      setScoreViewState(resetView);
       setAlignment([]); // Clear alignment as IDs will be completely different
+      setUnmappedHighlightActive(false);
       setGtAlignment([]); // Clear alignment as IDs will be completely different
       setSelectedNote(null);
+      setAlignmentMarks(emptyMarks());
+      setManualAnchorKeys(new Set());
+      setManualUndoStack([]);
+      setManualRedoStack([]);
+      setPlayback({
+        isPlaying: false,
+        startTime: 0,
+        startOffset: 0,
+        activePanel: "score",
+      });
+      setPlayheadTime(0);
+      if (alignInputRef.current) alignInputRef.current.value = "";
+      if (gtInputRef.current) gtInputRef.current.value = "";
     } else alert("Error: Invalid MIDI file.");
     e.target.value = "";
   };
@@ -355,21 +603,51 @@ const App: React.FC = () => {
     if (!file) return;
     const data = await parseMidiFile(file);
     if (data) {
+      const resetView = initialRollViewState(anchorX);
+      stopMidiPlayback();
       setPerfMidi(data);
+      perfViewStateRef.current = resetView;
+      setPerfViewState(resetView);
       setAlignment([]); // Clear alignment as IDs will be completely different
+      setUnmappedHighlightActive(false);
       setGtAlignment([]); // Clear alignment as IDs will be completely different
       setSelectedNote(null);
+      setAlignmentMarks(emptyMarks());
+      setManualAnchorKeys(new Set());
+      setManualUndoStack([]);
+      setManualRedoStack([]);
+      setPlayback({
+        isPlaying: false,
+        startTime: 0,
+        startOffset: 0,
+        activePanel: "perf",
+      });
+      setPlayheadTime(0);
+      if (alignInputRef.current) alignInputRef.current.value = "";
+      if (gtInputRef.current) gtInputRef.current.value = "";
     } else alert("Error: Invalid MIDI file.");
     e.target.value = "";
   };
 
   const clearAll = () => {
+    const resetView = initialRollViewState(anchorX);
     setScoreMidi(null);
     setPerfMidi(null);
+    scoreViewStateRef.current = resetView;
+    perfViewStateRef.current = resetView;
+    setScoreViewState(resetView);
+    setPerfViewState(resetView);
     setAlignment([]);
+    setUnmappedHighlightActive(false);
     setGtAlignment([]);
     setSelectedNote(null);
+    setAlignmentMarks(emptyMarks());
+    setManualAnchorKeys(new Set());
+    setManualUndoStack([]);
+    setManualRedoStack([]);
+    setDragLink(null);
     setPlayback((p) => ({ ...p, isPlaying: false }));
+    stopMidiPlayback();
     if (scoreInputRef.current) scoreInputRef.current.value = "";
     if (perfInputRef.current) perfInputRef.current.value = "";
     if (alignInputRef.current) alignInputRef.current.value = "";
@@ -384,7 +662,7 @@ const App: React.FC = () => {
       !containerRef.current
     )
       return null;
-    const panelH = containerRef.current.clientHeight / 2;
+    const panelH = containerSize.height / 2;
     const opacity = visibility === "half" ? 0.3 : 1;
     const lines: React.ReactElement[] = [];
 
@@ -495,11 +773,17 @@ const App: React.FC = () => {
     perfMidi,
     scoreViewState,
     perfViewState,
+    containerSize,
     visibility,
     selectedNote,
   ]);
 
-  const handleNoteClick = (n: MidiNote, panel: "score" | "perf") => {
+  const handleNoteClick = (n: MidiNote, panel: RollPanel) => {
+    focusPanel(panel);
+    const previewNote = getPreviewNote(n, panel);
+    if (previewNote) {
+      void playMidiNotePreview(previewNote);
+    }
     setSelectedNote((prev) =>
       prev?.id === n.id && prev?.panel === panel
         ? null
@@ -507,10 +791,300 @@ const App: React.FC = () => {
     );
   };
 
+  const sortedAlignment = (pairs: AlignmentTuple[]) =>
+    [...pairs].sort((a, b) => {
+      const scoreA = a.scoreId === -1 ? Number.MAX_SAFE_INTEGER : a.scoreId;
+      const scoreB = b.scoreId === -1 ? Number.MAX_SAFE_INTEGER : b.scoreId;
+      if (scoreA !== scoreB) return scoreA - scoreB;
+      return a.perfId - b.perfId;
+    });
+
+  const getCompletedMarks = (panel: RollPanel) => {
+    const marks = alignmentMarks[panel];
+    if (marks.left === null || marks.right === null) return null;
+    return {
+      left: Math.min(marks.left, marks.right),
+      right: Math.max(marks.left, marks.right),
+    };
+  };
+
+  const getNotesInMarkedRange = (midi: MidiData | null, panel: RollPanel) => {
+    const marks = getCompletedMarks(panel);
+    if (!midi || !marks) return [];
+
+    return midi.notes
+      .filter(
+        (note) =>
+          note.start >= marks.left && note.start <= marks.right,
+      )
+      .sort((a, b) => {
+        if (Math.abs(a.start - b.start) > 0.0001) return a.start - b.start;
+        return a.pitch - b.pitch;
+      });
+  };
+
+  const hasMelodyGuideInMarkedRange = (() => {
+    if (!scoreMidi || !perfMidi) return false;
+    const scoreIds = new Set(
+      getNotesInMarkedRange(scoreMidi, "score").map((note) => note.id),
+    );
+    const perfIds = new Set(
+      getNotesInMarkedRange(perfMidi, "perf").map((note) => note.id),
+    );
+    return alignment.some(
+      (pair) =>
+        pair.scoreId !== -1 &&
+        pair.perfId !== -1 &&
+        scoreIds.has(pair.scoreId) &&
+        perfIds.has(pair.perfId) &&
+        manualAnchorKeys.has(pairKey(pair.scoreId, pair.perfId)),
+    );
+  })();
+
+  const canRunMelodyAlignment =
+    getCompletedMarks("score") !== null &&
+    getCompletedMarks("perf") !== null &&
+    !!scoreMidi &&
+    !!perfMidi &&
+    hasMelodyGuideInMarkedRange;
+
+  const runMelodyGuidedSegmentAlignment = () => {
+    if (!scoreMidi || !perfMidi) return;
+
+    const scoreNotes = getNotesInMarkedRange(scoreMidi, "score");
+    const perfNotes = getNotesInMarkedRange(perfMidi, "perf");
+    if (scoreNotes.length === 0 || perfNotes.length === 0) return;
+
+    const scoreIds = new Set(scoreNotes.map((note) => note.id));
+    const perfIds = new Set(perfNotes.map((note) => note.id));
+    const guidePairs = alignment.filter(
+      (pair) =>
+        pair.scoreId !== -1 &&
+        pair.perfId !== -1 &&
+        scoreIds.has(pair.scoreId) &&
+        perfIds.has(pair.perfId) &&
+        manualAnchorKeys.has(pairKey(pair.scoreId, pair.perfId)),
+    );
+    if (guidePairs.length === 0) return;
+
+    const nextPairs = runMelodyGuidedAlignment(
+      scoreNotes,
+      perfNotes,
+      guidePairs,
+    ).filter((pair) => scoreIds.has(pair.scoreId) && perfIds.has(pair.perfId));
+
+    setManualUndoStack((undoStack) => [
+      ...undoStack,
+      { alignment, manualAnchorKeys: Array.from(manualAnchorKeys) },
+    ]);
+    setManualRedoStack([]);
+    setAlignment((prev) =>
+      sortedAlignment([
+        ...prev.filter(
+          (pair) =>
+            (pair.scoreId === -1 || !scoreIds.has(pair.scoreId)) &&
+            (pair.perfId === -1 || !perfIds.has(pair.perfId)),
+        ),
+        ...nextPairs,
+      ]),
+    );
+    setManualAnchorKeys((prev) => {
+      const next = new Set<string>();
+      prev.forEach((key) => {
+        const { scoreId, perfId } = pairKeyParts(key);
+        if (!scoreIds.has(scoreId) && !perfIds.has(perfId)) next.add(key);
+      });
+      guidePairs.forEach((pair) => next.add(pairKey(pair.scoreId, pair.perfId)));
+      return next;
+    });
+    setUnmappedHighlightActive(true);
+  };
+
+  const commitManualAlignment = (
+    fromPanel: RollPanel,
+    fromNote: MidiNote,
+    targetNote: MidiNote,
+  ) => {
+    const pair =
+      fromPanel === "score"
+        ? { scoreId: fromNote.id, annotId: -1, perfId: targetNote.id }
+        : { scoreId: targetNote.id, annotId: -1, perfId: fromNote.id };
+
+    setManualUndoStack((undoStack) => [
+      ...undoStack,
+      { alignment, manualAnchorKeys: Array.from(manualAnchorKeys) },
+    ]);
+    setManualRedoStack([]);
+    setAlignment(
+      sortedAlignment([
+        ...alignment.filter(
+          (existing) =>
+            existing.scoreId !== pair.scoreId &&
+            existing.perfId !== pair.perfId,
+        ),
+        pair,
+      ]),
+    );
+    setManualAnchorKeys((prev) => {
+      const next = new Set<string>();
+      prev.forEach((key) => {
+        const { scoreId, perfId } = pairKeyParts(key);
+        if (scoreId !== pair.scoreId && perfId !== pair.perfId) next.add(key);
+      });
+      next.add(pairKey(pair.scoreId, pair.perfId));
+      return next;
+    });
+  };
+
+  const findNearestNoteAtPoint = (
+    panel: RollPanel,
+    clientX: number,
+    clientY: number,
+  ) => {
+    const panelEl =
+      panel === "score" ? scorePanelRef.current : perfPanelRef.current;
+    const midi = panel === "score" ? scoreMidi : perfMidi;
+    const viewState =
+      panel === "score" ? scoreViewStateRef.current : perfViewStateRef.current;
+    if (!panelEl || !midi || midi.notes.length === 0) return null;
+
+    const rect = panelEl.getBoundingClientRect();
+    if (
+      clientX < rect.left ||
+      clientX > rect.right ||
+      clientY < rect.top ||
+      clientY > rect.bottom
+    ) {
+      return null;
+    }
+
+    const localX = clientX - rect.left;
+    const localY = clientY - rect.top;
+
+    return midi.notes.reduce<MidiNote | null>((closest, note) => {
+      const x = (note.start - viewState.scrollX) * viewState.zoomX;
+      const y =
+        rect.height - (note.pitch - viewState.scrollY + 1) * viewState.zoomY;
+      const w = Math.max(4, note.duration * viewState.zoomX);
+      const h = Math.max(2, viewState.zoomY - 1);
+
+      const dx =
+        localX < x ? x - localX : localX > x + w ? localX - (x + w) : 0;
+      const dy =
+        localY < y ? y - localY : localY > y + h ? localY - (y + h) : 0;
+      const distance = Math.hypot(dx, dy);
+
+      if (!closest) return note;
+
+      const closestX = (closest.start - viewState.scrollX) * viewState.zoomX;
+      const closestY =
+        rect.height - (closest.pitch - viewState.scrollY + 1) * viewState.zoomY;
+      const closestW = Math.max(4, closest.duration * viewState.zoomX);
+      const closestH = Math.max(2, viewState.zoomY - 1);
+      const closestDx =
+        localX < closestX
+          ? closestX - localX
+          : localX > closestX + closestW
+            ? localX - (closestX + closestW)
+            : 0;
+      const closestDy =
+        localY < closestY
+          ? closestY - localY
+          : localY > closestY + closestH
+            ? localY - (closestY + closestH)
+            : 0;
+
+      return distance < Math.hypot(closestDx, closestDy) ? note : closest;
+    }, null);
+  };
+
+  const getOverlayNotePoint = (panel: RollPanel, note: MidiNote) => {
+    if (!containerSize.height) return null;
+    const panelH = containerSize.height / 2;
+    const viewState = panel === "score" ? scoreViewState : perfViewState;
+    const x = (note.start + 0.05 - viewState.scrollX) * viewState.zoomX;
+    const yWithinPanel =
+      panelH - (note.pitch - viewState.scrollY + 0.5) * viewState.zoomY;
+    return { x, y: panel === "score" ? yWithinPanel : panelH + yWithinPanel };
+  };
+
+  const dragPreviewLine = useMemo(() => {
+    if (!dragLink || !containerRef.current) return null;
+    const start = getOverlayNotePoint(dragLink.fromPanel, dragLink.note);
+    if (!start) return null;
+    const rect = containerRef.current.getBoundingClientRect();
+
+    return (
+      <line
+        x1={start.x}
+        y1={start.y}
+        x2={dragLink.pointerX - rect.left}
+        y2={dragLink.pointerY - rect.top}
+        stroke="#38bdf8"
+        strokeWidth={2}
+        strokeOpacity={0.95}
+        strokeDasharray="6,5"
+      />
+    );
+  }, [dragLink, scoreViewState, perfViewState, containerSize]);
+
+  useEffect(() => {
+    if (!dragLink) return;
+
+    const handlePointerMove = (event: PointerEvent) => {
+      setDragLink((prev) =>
+        prev
+          ? { ...prev, pointerX: event.clientX, pointerY: event.clientY }
+          : null,
+      );
+    };
+
+    const handlePointerUp = (event: PointerEvent) => {
+      setDragLink((prev) => {
+        if (!prev) return null;
+        const targetPanel: RollPanel =
+          prev.fromPanel === "score" ? "perf" : "score";
+        const targetNote = findNearestNoteAtPoint(
+          targetPanel,
+          event.clientX,
+          event.clientY,
+        );
+        if (targetNote) {
+          commitManualAlignment(prev.fromPanel, prev.note, targetNote);
+          setSelectedNote({
+            id: prev.note.id,
+            midi: prev.note.pitch,
+            panel: prev.fromPanel,
+          });
+        }
+        return null;
+      });
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [dragLink, scoreMidi, perfMidi]);
+
+  const exportAlignment = () => {
+    const csv = sortedAlignment(alignment)
+      .map((pair) => `${pair.scoreId},${pair.annotId},${pair.perfId}`)
+      .join("\n");
+    const blob = new Blob([`${csv}\n`], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "edited_alignment.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   const scoreAnchorTime =
-    scoreViewState.scrollX + PLAYHEAD_ANCHOR_X / scoreViewState.zoomX;
-  const perfAnchorTime =
-    perfViewState.scrollX + PLAYHEAD_ANCHOR_X / perfViewState.zoomX;
+    scoreViewState.scrollX + anchorX / scoreViewState.zoomX;
+  const perfAnchorTime = perfViewState.scrollX + anchorX / perfViewState.zoomX;
 
   return (
     <div className="flex flex-col h-screen w-screen bg-[#09090b] text-zinc-100 overflow-hidden font-sans antialiased select-none">
@@ -560,8 +1134,14 @@ const App: React.FC = () => {
                 type="file"
                 onChange={async (e) => {
                   if (e.target.files?.[0]) {
+                    stopMidiPlayback();
                     const data = await parseAlignmentCsv(e.target.files[0]);
                     setAlignment(data);
+                    setUnmappedHighlightActive(data.length > 0);
+                    setManualAnchorKeys(new Set());
+                    setManualUndoStack([]);
+                    setManualRedoStack([]);
+                    setPlayback((prev) => ({ ...prev, isPlaying: false }));
                   }
                   e.target.value = "";
                 }}
@@ -597,9 +1177,70 @@ const App: React.FC = () => {
               </label>
             </div>
           </div>
+
+          <div className="flex items-center gap-2 bg-[#1c1c1f] p-1.5 rounded-xl border border-white/[0.04] shadow-inner">
+            <button
+              onClick={runMelodyGuidedSegmentAlignment}
+              disabled={!canRunMelodyAlignment}
+              className={`btn-modern group ${
+                canRunMelodyAlignment
+                  ? "!border-red-500/25 hover:!border-red-500/50 hover:bg-red-500/5"
+                  : "opacity-40 cursor-not-allowed"
+              }`}
+            >
+              <Wand2 className="w-4 h-4 text-red-400/70 group-hover:text-red-300 transition-colors" />
+              <span>Melody Align</span>
+            </button>
+            <button
+              onClick={exportAlignment}
+              disabled={alignment.length === 0}
+              className={`btn-modern group ${
+                alignment.length > 0
+                  ? "!border-emerald-500/20 hover:!border-emerald-500/40 hover:bg-emerald-500/5"
+                  : "opacity-40 cursor-not-allowed"
+              }`}
+            >
+              <Download className="w-4 h-4 text-emerald-400/70 group-hover:text-emerald-300 transition-colors" />
+              <span>Export</span>
+            </button>
+          </div>
         </div>
 
         <div className="flex items-center gap-4">
+          <button
+            onClick={() =>
+              setPlaybackSoundMode((prev) =>
+                prev === "native" ? "aligned-score" : "native",
+              )
+            }
+            className={`flex items-center gap-2 h-10 px-3 rounded-xl font-black text-[10px] tracking-wider border transition-all active:scale-[0.98] shadow-2xl whitespace-nowrap ${
+              playbackSoundMode === "aligned-score"
+                ? "bg-cyan-500/10 border-cyan-500/40 text-cyan-300 ring-1 ring-cyan-500/20"
+                : "bg-[#1c1c1f] border-white/5 text-zinc-500 hover:border-white/10"
+            }`}
+          >
+            <GitCompareArrows className="w-4 h-4" />
+            <span>PERF SOUND</span>
+            <span
+              className={`relative block h-5 w-10 shrink-0 overflow-hidden rounded-full border transition-colors ${
+                playbackSoundMode === "aligned-score"
+                  ? "bg-cyan-400/20 border-cyan-400/40"
+                  : "bg-black/30 border-white/10"
+              }`}
+            >
+              <span
+                className={`absolute left-0 top-0.5 block h-3.5 w-3.5 rounded-full transition-transform ${
+                  playbackSoundMode === "aligned-score"
+                    ? "translate-x-[21px] bg-cyan-300"
+                    : "translate-x-0.5 bg-zinc-500"
+                }`}
+              />
+            </span>
+            <span className="text-[8px] opacity-60">
+              {playbackSoundMode === "aligned-score" ? "ALIGNED" : "NATIVE"}
+            </span>
+          </button>
+
           <div className="flex bg-[#1c1c1f] rounded-xl p-1 border border-white/[0.04] shadow-inner">
             <button
               onClick={() => setVisibility("full")}
@@ -664,9 +1305,13 @@ const App: React.FC = () => {
         >
           <svg className="absolute inset-0 w-full h-full pointer-events-none z-30 drop-shadow-[0_0_10px_rgba(0,0,0,0.8)]">
             {renderedLines}
+            {dragPreviewLine}
           </svg>
 
-          <div className="flex-1 relative group border-b border-white/[0.04]">
+          <div
+            ref={scorePanelRef}
+            className="flex-1 relative group border-b border-white/[0.04]"
+          >
             <PianoRoll
               label="SCORE"
               data={scoreMidi}
@@ -675,15 +1320,28 @@ const App: React.FC = () => {
               playheadTime={
                 playback.activePanel === "score" ? playheadTime : null
               }
-              anchorX={PLAYHEAD_ANCHOR_X}
+              anchorX={anchorX}
+              rangeMarks={alignmentMarks.score}
               selectedNoteId={
                 selectedNote?.panel === "score" ? selectedNote.id : null
               }
               onNoteClick={(n) => handleNoteClick(n, "score")}
-              onBlankClick={() => setSelectedNote(null)}
+              onBlankClick={() => {
+                focusPanel("score");
+                setSelectedNote(null);
+              }}
               onScroll={(dx, dy) => handleScroll("score", dx, dy)}
               onZoom={(type, factor, center) =>
                 handleZoom("score", type, factor, center)
+              }
+              onPanelFocus={() => focusPanel("score")}
+              onNoteDragStart={(note, clientX, clientY) =>
+                setDragLink({
+                  fromPanel: "score",
+                  note,
+                  pointerX: clientX,
+                  pointerY: clientY,
+                })
               }
             />
             <div className="absolute right-8 top-8 flex items-center gap-2.5 z-40 opacity-0 group-hover:opacity-100 transition-all translate-y-2 group-hover:translate-y-0">
@@ -740,7 +1398,7 @@ const App: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex-1 relative group">
+          <div ref={perfPanelRef} className="flex-1 relative group">
             <PianoRoll
               label="PERFORMANCE"
               data={perfMidi}
@@ -749,15 +1407,28 @@ const App: React.FC = () => {
               playheadTime={
                 playback.activePanel === "perf" ? playheadTime : null
               }
-              anchorX={PLAYHEAD_ANCHOR_X}
+              anchorX={anchorX}
+              rangeMarks={alignmentMarks.perf}
               selectedNoteId={
                 selectedNote?.panel === "perf" ? selectedNote.id : null
               }
               onNoteClick={(n) => handleNoteClick(n, "perf")}
-              onBlankClick={() => setSelectedNote(null)}
+              onBlankClick={() => {
+                focusPanel("perf");
+                setSelectedNote(null);
+              }}
               onScroll={(dx, dy) => handleScroll("perf", dx, dy)}
               onZoom={(type, factor, center) =>
                 handleZoom("perf", type, factor, center)
+              }
+              onPanelFocus={() => focusPanel("perf")}
+              onNoteDragStart={(note, clientX, clientY) =>
+                setDragLink({
+                  fromPanel: "perf",
+                  note,
+                  pointerX: clientX,
+                  pointerY: clientY,
+                })
               }
             />
             <div className="absolute right-8 bottom-8 flex items-center gap-2.5 z-40 opacity-0 group-hover:opacity-100 transition-all -translate-y-2 group-hover:translate-y-0">
@@ -859,7 +1530,7 @@ const App: React.FC = () => {
             <span className="text-zinc-500">
               scroll + ALT: Pitch Zoom, scroll + CMD: Time Zoom,
               <br></br>
-              V: Sync, left/right: next ID
+              M: Mark {activeEditPanel.toUpperCase()}, DEL: Clear Mark, V: Sync
             </span>
           </span>
           <div className="h-5 w-px bg-white/10" />
