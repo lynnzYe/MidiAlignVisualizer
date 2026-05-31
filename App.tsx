@@ -21,6 +21,8 @@ import {
   parseAlignmentCsv,
   loadMidiFromUrl,
   loadAlignmentCsvFromUrl,
+  isMatchedAlignmentTuple,
+  sortAlignmentTuples,
 } from "./services/midiService";
 import PianoRoll from "./components/PianoRoll";
 import {
@@ -89,8 +91,8 @@ const getUnmappedNoteIds = (
   const matched = new Set<number>();
   alignment.forEach((pair) => {
     if (panel === "score") {
-      if (pair.scoreId !== -1 && pair.perfId !== -1) matched.add(pair.scoreId);
-    } else if (pair.perfId !== -1 && pair.scoreId !== -1) {
+      if (isMatchedAlignmentTuple(pair)) matched.add(pair.scoreId);
+    } else if (isMatchedAlignmentTuple(pair)) {
       matched.add(pair.perfId);
     }
   });
@@ -105,6 +107,36 @@ const getUnmappedNoteIds = (
     if (noteIds.has(id) && !matched.has(id)) unmapped.add(id);
   }
   return unmapped;
+};
+
+const getPitchMismatchStats = (
+  scoreMidi: MidiData | null,
+  perfMidi: MidiData | null,
+  alignment: AlignmentTuple[],
+) => {
+  if (!scoreMidi || !perfMidi) {
+    return { checked: 0, missing: 0, mismatched: 0 };
+  }
+
+  const scoreNoteById = new Map(scoreMidi.notes.map((note) => [note.id, note]));
+  const perfNoteById = new Map(perfMidi.notes.map((note) => [note.id, note]));
+  let checked = 0;
+  let missing = 0;
+  let mismatched = 0;
+
+  alignment.forEach((pair) => {
+    if (!isMatchedAlignmentTuple(pair)) return;
+    const scoreNote = scoreNoteById.get(pair.scoreId);
+    const perfNote = perfNoteById.get(pair.perfId);
+    if (!scoreNote || !perfNote) {
+      missing += 1;
+      return;
+    }
+    checked += 1;
+    if (scoreNote.pitch !== perfNote.pitch) mismatched += 1;
+  });
+
+  return { checked, missing, mismatched };
 };
 
 const App: React.FC = () => {
@@ -241,15 +273,29 @@ const App: React.FC = () => {
     return new Map(scoreMidi?.notes.map((note) => [note.id, note]) ?? []);
   }, [scoreMidi]);
 
+  const matchedAlignment = useMemo(
+    () => alignment.filter(isMatchedAlignmentTuple),
+    [alignment],
+  );
+
+  const matchedGtAlignment = useMemo(
+    () => gtAlignment.filter(isMatchedAlignmentTuple),
+    [gtAlignment],
+  );
+
+  const pitchMismatchStats = useMemo(
+    () => getPitchMismatchStats(scoreMidi, perfMidi, alignment),
+    [scoreMidi, perfMidi, alignment],
+  );
+
   const alignedScoreByPerfId = useMemo(() => {
     const map = new Map<number, MidiNote>();
-    alignment.forEach((pair) => {
-      if (pair.scoreId === -1 || pair.perfId === -1) return;
+    matchedAlignment.forEach((pair) => {
       const scoreNote = scoreNoteById.get(pair.scoreId);
       if (scoreNote) map.set(pair.perfId, scoreNote);
     });
     return map;
-  }, [alignment, scoreNoteById]);
+  }, [matchedAlignment, scoreNoteById]);
 
   const getPlaybackNotes = useCallback(
     (panel: RollPanel) => {
@@ -463,7 +509,9 @@ const App: React.FC = () => {
                 n.start <= currentPos && n.start + n.duration >= currentPos,
             );
             if (sNote) {
-              const pId = alignment.find((a) => a.scoreId === sNote.id)?.perfId;
+              const pId = matchedAlignment.find(
+                (a) => a.scoreId === sNote.id,
+              )?.perfId;
               const pNote = perfMidi?.notes.find((n) => n.id === pId);
               if (pNote && pId !== -1)
                 setPerfViewState((prev) => ({
@@ -483,7 +531,9 @@ const App: React.FC = () => {
                 n.start <= currentPos && n.start + n.duration >= currentPos,
             );
             if (pNote) {
-              const sId = alignment.find((a) => a.perfId === pNote.id)?.scoreId;
+              const sId = matchedAlignment.find(
+                (a) => a.perfId === pNote.id,
+              )?.scoreId;
               const sNote = scoreMidi?.notes.find((n) => n.id === sId);
               if (sNote && sId !== -1)
                 setScoreViewState((prev) => ({
@@ -498,7 +548,7 @@ const App: React.FC = () => {
     };
     requestRef.current = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(requestRef.current!);
-  }, [syncScroll, scoreMidi, perfMidi, alignment, anchorX]);
+  }, [syncScroll, scoreMidi, perfMidi, matchedAlignment, anchorX]);
 
   useEffect(() => () => stopMidiPlayback(), []);
 
@@ -666,9 +716,7 @@ const App: React.FC = () => {
     const opacity = visibility === "half" ? 0.3 : 1;
     const lines: React.ReactElement[] = [];
 
-    alignment.forEach((pair, idx) => {
-      if (pair.scoreId === -1 || pair.perfId === -1) return;
-
+    matchedAlignment.forEach((pair, idx) => {
       const sNote = scoreMidi.notes.find((n) => n.id === pair.scoreId);
       const pNote = perfMidi.notes.find((n) => n.id === pair.perfId);
       if (!sNote || !pNote) return;
@@ -678,10 +726,10 @@ const App: React.FC = () => {
         ((selectedNote.panel === "score" && selectedNote.id === sNote.id) ||
           (selectedNote.panel === "perf" && selectedNote.id === pNote.id));
 
-      const hasGt = gtAlignment.length > 0;
+      const hasGt = matchedGtAlignment.length > 0;
       const isCorrect =
         hasGt &&
-        gtAlignment.some(
+        matchedGtAlignment.some(
           (gt) => gt.scoreId === pair.scoreId && gt.perfId === pair.perfId,
         );
 
@@ -721,14 +769,14 @@ const App: React.FC = () => {
       );
     });
 
-    if (selectedNote && gtAlignment.length > 0) {
-      const pair = gtAlignment.find(
+    if (selectedNote && matchedGtAlignment.length > 0) {
+      const pair = matchedGtAlignment.find(
         (gt) =>
           (selectedNote.panel === "score" && gt.scoreId === selectedNote.id) ||
           (selectedNote.panel === "perf" && gt.perfId === selectedNote.id),
       );
 
-      if (pair && pair.scoreId !== -1 && pair.perfId !== -1) {
+      if (pair) {
         const sNote = scoreMidi.notes.find((n) => n.id === pair.scoreId);
         const pNote = perfMidi.notes.find((n) => n.id === pair.perfId);
         const isAlreadyDrawn = alignment.some(
@@ -768,7 +816,8 @@ const App: React.FC = () => {
     return lines;
   }, [
     alignment,
-    gtAlignment,
+    matchedAlignment,
+    matchedGtAlignment,
     scoreMidi,
     perfMidi,
     scoreViewState,
@@ -791,13 +840,7 @@ const App: React.FC = () => {
     );
   };
 
-  const sortedAlignment = (pairs: AlignmentTuple[]) =>
-    [...pairs].sort((a, b) => {
-      const scoreA = a.scoreId === -1 ? Number.MAX_SAFE_INTEGER : a.scoreId;
-      const scoreB = b.scoreId === -1 ? Number.MAX_SAFE_INTEGER : b.scoreId;
-      if (scoreA !== scoreB) return scoreA - scoreB;
-      return a.perfId - b.perfId;
-    });
+  const sortedAlignment = sortAlignmentTuples;
 
   const getCompletedMarks = (panel: RollPanel) => {
     const marks = alignmentMarks[panel];
@@ -831,10 +874,8 @@ const App: React.FC = () => {
     const perfIds = new Set(
       getNotesInMarkedRange(perfMidi, "perf").map((note) => note.id),
     );
-    return alignment.some(
+    return matchedAlignment.some(
       (pair) =>
-        pair.scoreId !== -1 &&
-        pair.perfId !== -1 &&
         scoreIds.has(pair.scoreId) &&
         perfIds.has(pair.perfId) &&
         manualAnchorKeys.has(pairKey(pair.scoreId, pair.perfId)),
@@ -857,10 +898,8 @@ const App: React.FC = () => {
 
     const scoreIds = new Set(scoreNotes.map((note) => note.id));
     const perfIds = new Set(perfNotes.map((note) => note.id));
-    const guidePairs = alignment.filter(
+    const guidePairs = matchedAlignment.filter(
       (pair) =>
-        pair.scoreId !== -1 &&
-        pair.perfId !== -1 &&
         scoreIds.has(pair.scoreId) &&
         perfIds.has(pair.perfId) &&
         manualAnchorKeys.has(pairKey(pair.scoreId, pair.perfId)),
@@ -1532,6 +1571,26 @@ const App: React.FC = () => {
               <br></br>
               M: Mark {activeEditPanel.toUpperCase()}, DEL: Clear Mark, V: Sync
             </span>
+          </span>
+          <div className="h-5 w-px bg-white/10" />
+          <span
+            className={`transition-all px-4 py-1.5 rounded-lg text-[9px] border ${
+              pitchMismatchStats.mismatched > 0 || pitchMismatchStats.missing > 0
+                ? "text-red-300 bg-red-500/10 border-red-500/30"
+                : pitchMismatchStats.checked > 0
+                  ? "text-emerald-300 bg-emerald-500/10 border-emerald-500/30"
+                  : "text-zinc-700 border-white/5 bg-white/2 opacity-50"
+            }`}
+            title={
+              pitchMismatchStats.checked > 0
+                ? `${pitchMismatchStats.mismatched} pitch mismatches, ${pitchMismatchStats.missing} missing note references`
+                : "Load score, performance, and alignment to validate pitch IDs"
+            }
+          >
+            Matched Pitches:{" "}
+            {pitchMismatchStats.checked > 0
+              ? `${pitchMismatchStats.mismatched}/${pitchMismatchStats.checked}`
+              : "IDLE"}
           </span>
           <div className="h-5 w-px bg-white/10" />
           <span

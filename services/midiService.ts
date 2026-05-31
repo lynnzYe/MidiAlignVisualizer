@@ -3,6 +3,38 @@ import { Midi } from '@tonejs/midi';
 import { MidiData, MidiGridLine, MidiNote, AlignmentTuple } from '../types';
 
 const DEFAULT_TIME_SIGNATURE: [number, number] = [4, 4];
+const UNMAPPED_ID = -1;
+
+const parseIntegerCell = (value: string) => {
+  const trimmed = value.trim().replace(/^["'](.+)["']$/, '$1').trim();
+  if (!/^-?\d+$/.test(trimmed)) return NaN;
+  return Number.parseInt(trimmed, 10);
+};
+
+export const isMatchedAlignmentTuple = (pair: AlignmentTuple) =>
+  pair.scoreId >= 0 && pair.perfId >= 0;
+
+export const isDeletedScoreTuple = (pair: AlignmentTuple) =>
+  pair.scoreId >= 0 && pair.perfId === UNMAPPED_ID;
+
+export const isInsertedPerfTuple = (pair: AlignmentTuple) =>
+  pair.scoreId === UNMAPPED_ID && pair.perfId >= 0;
+
+export const isValidAlignmentTuple = (pair: AlignmentTuple) =>
+  isMatchedAlignmentTuple(pair) ||
+  isDeletedScoreTuple(pair) ||
+  isInsertedPerfTuple(pair);
+
+export const sortAlignmentTuples = (pairs: AlignmentTuple[]) =>
+  [...pairs].sort((a, b) => {
+    const scoreA = a.scoreId === UNMAPPED_ID ? Number.MAX_SAFE_INTEGER : a.scoreId;
+    const scoreB = b.scoreId === UNMAPPED_ID ? Number.MAX_SAFE_INTEGER : b.scoreId;
+    if (scoreA !== scoreB) return scoreA - scoreB;
+    return a.perfId - b.perfId;
+  });
+
+export const normalizeAlignmentTuples = (pairs: AlignmentTuple[]) =>
+  sortAlignmentTuples(pairs.filter(isValidAlignmentTuple));
 
 const buildGridLines = (midi: Midi): MidiGridLine[] => {
   const durationTicks = midi.durationTicks;
@@ -71,34 +103,57 @@ export function parseMidiBuffer(arrayBuffer: ArrayBuffer): MidiData | null {
     }
 
     const midi = new Midi(arrayBuffer);
-    let allNotes: MidiNote[] = [];
+    let allNotes: Array<
+      MidiNote & {
+        sortVelocity: number;
+        sortTrackIndex: number;
+        sortNoteIndex: number;
+      }
+    > = [];
 
-    midi.tracks.forEach(track => {
-      track.notes.forEach(note => {
+    midi.tracks.forEach((track, trackIndex) => {
+      track.notes.forEach((note, noteIndex) => {
         allNotes.push({
           id: -1, // Placeholder
           pitch: note.midi,
           start: note.time,
           duration: note.duration,
-          ticks: note.ticks,
-          durationTicks: note.durationTicks,
-          velocity: note.velocity
+          ticks: Math.round(note.ticks),
+          durationTicks: Math.round(note.durationTicks),
+          velocity: note.velocity,
+          sortVelocity: Math.round((note.velocity ?? 0) * 127),
+          sortTrackIndex: trackIndex,
+          sortNoteIndex: noteIndex,
         });
       });
     });
 
-    // Deterministic sorting for ID assignment. Use ticks first so IDs match
-    // MIDI-order alignment files even when tempo maps produce dense time values.
+    // Universal ID order: global note sort by onset, pitch, duration, velocity.
+    // This matches PianoCoRe/symusic refined MIDI IDs and also avoids assigning
+    // all right-hand track notes before left-hand track notes in multi-track MIDIs.
     allNotes.sort((a, b) => {
       if (a.ticks !== b.ticks) return a.ticks - b.ticks;
-      return a.pitch - b.pitch;
+      if (a.pitch !== b.pitch) return a.pitch - b.pitch;
+      if (a.durationTicks !== b.durationTicks) return a.durationTicks - b.durationTicks;
+      if (a.sortVelocity !== b.sortVelocity) return a.sortVelocity - b.sortVelocity;
+      if (a.sortTrackIndex !== b.sortTrackIndex) return a.sortTrackIndex - b.sortTrackIndex;
+      return a.sortNoteIndex - b.sortNoteIndex;
     });
 
-    // Assign IDs 0 to N-1
-    const notesWithIds = allNotes.map((note, index) => ({
-      ...note,
-      id: index
-    }));
+    const notesWithIds = allNotes.map(
+      (
+        {
+          sortVelocity,
+          sortTrackIndex,
+          sortNoteIndex,
+          ...note
+        },
+        index,
+      ) => ({
+        ...note,
+        id: index
+      }),
+    );
 
     return {
       notes: notesWithIds,
@@ -126,28 +181,31 @@ export function parseCsvText(text: string): AlignmentTuple[] {
     const pairs: AlignmentTuple[] = [];
 
     lines.forEach(line => {
-      // Handle both comma and space separators, stripping quotes
-      const parts = line.split(/[,\s]+/).map(p => p.trim().replace(/^["'](.+)["']$/, '$1'));
+      // Preserve empty comma-separated cells, e.g. "score_idx,,perf_idx".
+      // Whitespace remains supported for older two-column alignment files.
+      const parts = line.includes(',')
+        ? line.split(',').map((part) => part.trim())
+        : line.split(/\s+/).map((part) => part.trim());
 
       let sId = NaN;
       let pId = NaN;
 
       if (parts.length >= 3) {
         // Handle three-column format: score_id, annot_id, perf_id
-        sId = parseInt(parts[0]);
-        pId = parseInt(parts[2]);
+        sId = parseIntegerCell(parts[0]);
+        pId = parseIntegerCell(parts[2]);
       } else if (parts.length === 2) {
         // Fallback for standard two-column format: score_id, perf_id
-        sId = parseInt(parts[0]);
-        pId = parseInt(parts[1]);
+        sId = parseIntegerCell(parts[0]);
+        pId = parseIntegerCell(parts[1]);
       }
 
       if (!isNaN(sId) && !isNaN(pId)) {
-        pairs.push({ scoreId: sId, annotId: -1, perfId: pId });
+        pairs.push({ scoreId: sId, annotId: UNMAPPED_ID, perfId: pId });
       }
     });
 
-    return pairs;
+    return normalizeAlignmentTuples(pairs);
   } catch (err) {
     console.error('Error parsing CSV text:', err);
     return [];
